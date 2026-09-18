@@ -11,6 +11,7 @@ from free_claude_code.application.connected_accounts import (
 )
 from free_claude_code.application.model_metadata import ProviderModelRefreshResult
 from free_claude_code.application.ports import RequestRuntimePort, TaskController
+from free_claude_code.application.route_health_observer import RouteHealthObserver
 from free_claude_code.application.smart_router import SmartRouter
 from free_claude_code.application.web_tools.ports import WebToolsPort
 from free_claude_code.config.admin.state import ConfigInputValue, ValueState
@@ -76,4 +77,5 @@ class ApiServices:
     tasks: TaskController
     web_tools: WebToolsPort
     smart_router: SmartRouter | None = None
+    route_health_observer: RouteHealthObserver | None = None
     code: CodeApplicationPort | None = None

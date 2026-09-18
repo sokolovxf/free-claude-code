@@ -254,6 +254,10 @@ def test_runtime_owns_single_shared_smart_router() -> None:
     assert runtime._route_health is runtime._smart_router.health
     assert runtime.smart_router is runtime._smart_router
     assert runtime.smart_router is runtime._smart_router
+    # The shared health observer writes into exactly the store SmartRouter reads.
+    assert runtime.route_health_observer is runtime._route_health_observer
+    assert runtime.route_health_observer._store is runtime._route_health
+
 
 
 @pytest.mark.asyncio

@@ -26,6 +26,7 @@ from free_claude_code.api.response_streams import (
 from free_claude_code.application.errors import ApplicationError
 from free_claude_code.application.execution import ProviderExecutor, TokenCounter
 from free_claude_code.application.ports import ModelInfoLookup, ProviderResolver
+from free_claude_code.application.route_health_observer import RouteHealthObserver
 from free_claude_code.application.routing import ModelRouter, RoutedMessagesRequest
 from free_claude_code.application.web_tools.ports import WebToolsPort
 from free_claude_code.application.web_tools.service import WebToolService
@@ -75,6 +76,7 @@ class MessagesHandler:
         generation_id: int | None = None,
         request_headers: Mapping[str, str] | None = None,
         model_info_lookup: ModelInfoLookup | None = None,
+        route_health_observer: RouteHealthObserver | None = None,
     ) -> None:
         self._settings = settings
         self._model_router = model_router or ModelRouter(settings)
@@ -86,6 +88,7 @@ class MessagesHandler:
             log_raw_payloads=settings.log_raw_api_payloads,
             request_headers=request_headers,
             model_info_lookup=model_info_lookup,
+            route_health_observer=route_health_observer,
         )
         self._web_tools = WebToolService(
             settings=settings,

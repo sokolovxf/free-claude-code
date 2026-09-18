@@ -67,6 +67,7 @@ async def _create_messages_response(
             generation_id=lease.generation_id,
             request_headers=request_headers,
             model_info_lookup=lease.model_info,
+            route_health_observer=services.route_health_observer,
         )
         response = await handler.create(request_data, request_id=request_id)
     except ApplicationError as exc:
@@ -105,6 +106,7 @@ async def _create_responses_response(
             ),
             generation_id=lease.generation_id,
             request_headers=request_headers,
+            route_health_observer=services.route_health_observer,
         )
         response = await handler.create(request_data, request_id=request_id)
     except ApplicationError as exc:

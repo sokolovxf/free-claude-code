@@ -30,6 +30,7 @@ from free_claude_code.core.trace import (
 )
 
 from .ports import ModelInfoLookup, ProviderResolver
+from .route_health_observer import RouteHealthObserver
 from .routing import (
     ProviderModelTarget,
     ResolvedModelRoute,
@@ -62,6 +63,7 @@ class ProviderExecutor:
         log_raw_payloads: bool = False,
         request_headers: Mapping[str, str] | None = None,
         model_info_lookup: ModelInfoLookup | None = None,
+        route_health_observer: RouteHealthObserver | None = None,
     ) -> None:
         if not math.isfinite(progress_timeout_seconds) or progress_timeout_seconds <= 0:
             raise ValueError("progress_timeout_seconds must be finite and positive")
@@ -73,6 +75,7 @@ class ProviderExecutor:
         self._log_raw_payloads = log_raw_payloads
         self._request_headers = MappingProxyType(dict(request_headers or {}))
         self._progress_timeout_seconds = float(progress_timeout_seconds)
+        self._observer = route_health_observer
 
     def _progress_timeout_failure(
         self,
@@ -392,6 +395,10 @@ class ProviderExecutor:
                             continue
                         if not candidate_committed:
                             candidate_committed = True
+                            if self._observer is not None:
+                                self._observer.observe_success(
+                                    target.provider_model_ref
+                                )
                             if index > 0:
                                 self._trace_fallback_selected(
                                     request_id=request_id,
@@ -427,7 +434,19 @@ class ProviderExecutor:
 
                 if candidate_failure is None:
                     return
-                if candidate_committed or index + 1 >= len(candidates):
+                if candidate_committed:
+                    # A stream that already delivered content failed afterward.
+                    # The route demonstrated availability; never demote it.
+                    if self._observer is not None:
+                        self._observer.observe_post_commit_failure(
+                            target.provider_model_ref, candidate_failure
+                        )
+                    raise candidate_failure
+                if self._observer is not None:
+                    self._observer.observe_failure(
+                        target.provider_model_ref, candidate_failure
+                    )
+                if index + 1 >= len(candidates):
                     raise candidate_failure
                 next_target = candidates[index + 1]
                 self._trace_fallback_started(

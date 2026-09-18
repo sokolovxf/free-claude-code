@@ -29,6 +29,7 @@ from free_claude_code.application.model_metadata import ProviderModelRefreshResu
 from free_claude_code.application.model_registry import ModelRegistry
 from free_claude_code.application.ports import StopResult
 from free_claude_code.application.route_health import RouteHealthStore
+from free_claude_code.application.route_health_observer import RouteHealthObserver
 from free_claude_code.application.smart_router import SmartRouter
 from free_claude_code.config.admin.persistence import (
     PreparedAdminUpdate,
@@ -173,6 +174,7 @@ class ApplicationRuntime:
             self._model_registry,
             self._route_health,
         )
+        self._route_health_observer = RouteHealthObserver(self._route_health)
         self._configuration = configuration
         self._code_service = code_service
         self._folder_picker = NativeFolderPicker()
@@ -213,6 +215,11 @@ class ApplicationRuntime:
     def smart_router(self) -> SmartRouter:
         """Shared process-lifetime Smart Router."""
         return self._smart_router
+
+    @property
+    def route_health_observer(self) -> RouteHealthObserver:
+        """Shared process-lifetime health observer on the route health store."""
+        return self._route_health_observer
 
     @property
     def is_closed(self) -> bool:
