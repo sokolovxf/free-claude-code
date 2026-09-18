@@ -90,6 +90,7 @@ def build_asgi_app(
         admin=runtime,
         tasks=runtime,
         web_tools=HTTPWebToolsClient(),
+        smart_router=runtime.smart_router,
         code=code_service,
     )
     return RuntimeASGIApp(create_app(services), runtime)

@@ -26,7 +26,10 @@ from free_claude_code.application.errors import (
     InvalidRequestError,
 )
 from free_claude_code.application.model_metadata import ProviderModelRefreshResult
+from free_claude_code.application.model_registry import ModelRegistry
 from free_claude_code.application.ports import StopResult
+from free_claude_code.application.route_health import RouteHealthStore
+from free_claude_code.application.smart_router import SmartRouter
 from free_claude_code.config.admin.persistence import (
     PreparedAdminUpdate,
 )
@@ -163,6 +166,13 @@ class ApplicationRuntime:
         connected_accounts: Mapping[str, ConnectedAccountPort] | None = None,
     ) -> None:
         self.provider_manager = provider_manager
+        self._model_registry = ModelRegistry()
+        self._route_health = RouteHealthStore()
+        self._route_health.load()
+        self._smart_router = SmartRouter(
+            self._model_registry,
+            self._route_health,
+        )
         self._configuration = configuration
         self._code_service = code_service
         self._folder_picker = NativeFolderPicker()
@@ -198,6 +208,11 @@ class ApplicationRuntime:
     @property
     def settings(self) -> Settings:
         return self.provider_manager.current_settings()
+
+    @property
+    def smart_router(self) -> SmartRouter:
+        """Shared process-lifetime Smart Router."""
+        return self._smart_router
 
     @property
     def is_closed(self) -> bool:

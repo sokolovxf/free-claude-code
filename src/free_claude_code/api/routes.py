@@ -7,6 +7,7 @@ from loguru import logger
 
 from free_claude_code.application.errors import ApplicationError
 from free_claude_code.application.ports import ProviderResolver, RequestRuntimeLease
+from free_claude_code.application.routing import ModelRouter
 from free_claude_code.config.model_refs import parse_provider_type
 from free_claude_code.config.settings import Settings
 from free_claude_code.core.anthropic import (
@@ -58,6 +59,10 @@ async def _create_messages_response(
             lease.settings,
             web_tools=services.web_tools,
             provider_resolver=_provider_resolver(lease),
+            model_router=ModelRouter(
+                lease.settings,
+                smart_router=services.smart_router,
+            ),
             token_counter=get_token_count,
             generation_id=lease.generation_id,
             request_headers=request_headers,
@@ -94,6 +99,10 @@ async def _create_responses_response(
         handler = ResponsesHandler(
             lease.settings,
             provider_resolver=_provider_resolver(lease),
+            model_router=ModelRouter(
+                lease.settings,
+                smart_router=services.smart_router,
+            ),
             generation_id=lease.generation_id,
             request_headers=request_headers,
         )
@@ -171,7 +180,14 @@ async def count_tokens(
     lease = await services.requests.acquire()
     try:
         await lease.wait_for_token_estimation()
-        handler = TokenCountHandler(lease.settings, token_counter=get_token_count)
+        handler = TokenCountHandler(
+            lease.settings,
+            model_router=ModelRouter(
+                lease.settings,
+                smart_router=services.smart_router,
+            ),
+            token_counter=get_token_count,
+        )
         return handler.count(request_data, request_id=get_request_id(request))
     finally:
         await lease.release()
