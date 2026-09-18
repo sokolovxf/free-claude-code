@@ -1,6 +1,10 @@
 """Model routing for Claude-compatible requests."""
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .smart_router import SmartRouter
 
 from loguru import logger
 
@@ -73,8 +77,14 @@ class RoutedTokenCountRequest:
 class ModelRouter:
     """Resolve incoming Claude model names to configured provider/model pairs."""
 
-    def __init__(self, settings: Settings):
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        smart_router: SmartRouter | None = None,
+    ):
         self._settings = settings
+        self._smart_router = smart_router
 
     def resolve(self, claude_model_name: str) -> ResolvedModelRoute:
         (
@@ -112,12 +122,51 @@ class ModelRouter:
                 claude_model_name,
                 primary.provider_model,
             )
+        fallbacks = self._fallback_targets(primary)
+        primary, fallbacks = self._smart_order(
+            primary,
+            fallbacks,
+        )
+
         return ResolvedModelRoute(
             original_model=claude_model_name,
             primary=primary,
-            fallbacks=self._fallback_targets(primary),
+            fallbacks=fallbacks,
             reasoning_preference=reasoning_preference,
         )
+
+    def _smart_order(
+        self,
+        primary: ProviderModelTarget,
+        fallbacks: tuple[ProviderModelTarget, ...],
+    ) -> tuple[ProviderModelTarget, tuple[ProviderModelTarget, ...]]:
+        """Use SmartRouter when explicitly injected and able to rank routes.
+
+        The legacy configured order remains the safe fallback when SmartRouter
+        has no executable candidates, which keeps existing FCC installations
+        functional while the intelligence registry is being populated.
+        """
+        if self._smart_router is None:
+            return primary, fallbacks
+
+        targets = (primary, *fallbacks)
+        ranked = self._smart_router.rank(targets)
+
+        if not ranked:
+            return primary, fallbacks
+
+        ordered = tuple(route.target for route in ranked)
+        selected = ordered[0]
+        remaining = tuple(target for target in ordered[1:] if target != selected)
+
+        logger.debug(
+            "SMART ROUTER: '{}' -> '{}' ({} candidates)",
+            primary.provider_model_ref,
+            selected.provider_model_ref,
+            len(ordered),
+        )
+
+        return selected, remaining
 
     def _target_from_ref(self, provider_model_ref: str) -> ProviderModelTarget:
         return self._target(
