@@ -245,6 +245,17 @@ def _runtime_with_admin_provider(
     ), manager
 
 
+def test_runtime_owns_single_shared_smart_router() -> None:
+    runtime, _manager = _runtime_with_admin_provider(AdminModelProvider())
+
+    # The process-lifetime SmartRouter shares the runtime's ModelRegistry and
+    # RouteHealthStore, and is created exactly once (stable identity).
+    assert runtime._model_registry is runtime._smart_router.registry
+    assert runtime._route_health is runtime._smart_router.health
+    assert runtime.smart_router is runtime._smart_router
+    assert runtime.smart_router is runtime._smart_router
+
+
 @pytest.mark.asyncio
 async def test_provider_check_caches_and_returns_sorted_models() -> None:
     provider = AdminModelProvider(

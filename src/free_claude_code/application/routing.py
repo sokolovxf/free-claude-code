@@ -1,5 +1,7 @@
 """Model routing for Claude-compatible requests."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -8,7 +10,10 @@ if TYPE_CHECKING:
 
 from loguru import logger
 
-from free_claude_code.application.errors import UnknownProviderError
+from free_claude_code.application.errors import (
+    NoFreeRouteAvailableError,
+    UnknownProviderError,
+)
 from free_claude_code.config.model_refs import (
     is_retired_model_ref,
     parse_model_name,
@@ -25,6 +30,7 @@ from free_claude_code.core.gateway_model_ids import decode_gateway_model_id
 from free_claude_code.core.openai_responses import OpenAIResponsesRequest
 from free_claude_code.core.reasoning import ReasoningPolicy
 
+from .model_intelligence import synchronize_model_registry
 from .reasoning import resolve_reasoning_policy, resolve_responses_reasoning_policy
 
 _ROUTE_SETTINGS = (
@@ -142,18 +148,26 @@ class ModelRouter:
     ) -> tuple[ProviderModelTarget, tuple[ProviderModelTarget, ...]]:
         """Use SmartRouter when explicitly injected and able to rank routes.
 
-        The legacy configured order remains the safe fallback when SmartRouter
-        has no executable candidates, which keeps existing FCC installations
-        functional while the intelligence registry is being populated.
+        When no SmartRouter is injected the legacy configured order is used
+        unchanged, preserving standalone/unit-test compatibility. When a
+        SmartRouter IS injected (the FCC runtime), the hard-$0 policy applies:
+        if no candidate is both verified-free and healthy, we raise rather
+        than silently falling back to the configured (possibly paid or
+        unverified) ordering.
         """
         if self._smart_router is None:
             return primary, fallbacks
+
+        synchronize_model_registry(self._smart_router.registry, self._settings)
 
         targets = (primary, *fallbacks)
         ranked = self._smart_router.rank(targets)
 
         if not ranked:
-            return primary, fallbacks
+            raise NoFreeRouteAvailableError(
+                "No verified-free route is currently executable. All configured "
+                "routes are either not explicitly verified free or unavailable."
+            )
 
         ordered = tuple(route.target for route in ranked)
         selected = ordered[0]

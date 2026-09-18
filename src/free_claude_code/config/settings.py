@@ -44,6 +44,10 @@ OptionalModelFallbacks = Annotated[
     tuple[NonEmptyString, ...] | None,
     BeforeValidator(parse_model_fallbacks),
 ]
+OptionalVerifiedFreeModels = Annotated[
+    tuple[NonEmptyString, ...] | None,
+    BeforeValidator(parse_model_fallbacks),
+]
 
 
 def _validate_model_ref(value: str) -> str:
@@ -387,6 +391,10 @@ class Settings(BaseModel):
     model_fallbacks: OptionalModelFallbacks = Field(
         default=None,
         validation_alias="MODEL_FALLBACKS",
+    )
+    verified_free_models: OptionalVerifiedFreeModels = Field(
+        default=None,
+        validation_alias="FCC_VERIFIED_FREE_MODELS",
     )
 
     # ==================== Per-Provider Proxy ====================
@@ -808,6 +816,20 @@ class Settings(BaseModel):
         validated = tuple(_validate_model_ref(model_ref) for model_ref in value)
         if len(validated) != len(set(validated)):
             raise ValueError("MODEL_FALLBACKS must not contain duplicate model refs.")
+        return validated
+
+    @field_validator("verified_free_models")
+    @classmethod
+    def validate_verified_free_models(
+        cls, value: tuple[str, ...] | None
+    ) -> tuple[str, ...] | None:
+        if value is None:
+            return None
+        validated = tuple(_validate_model_ref(model_ref) for model_ref in value)
+        if len(validated) != len(set(validated)):
+            raise ValueError(
+                "FCC_VERIFIED_FREE_MODELS must not contain duplicate model refs."
+            )
         return validated
 
     @model_validator(mode="after")

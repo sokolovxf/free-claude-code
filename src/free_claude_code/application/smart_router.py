@@ -147,7 +147,7 @@ class SmartRouter:
                 health=candidate.health,
                 tier_score=candidate.tier_score,
                 capability_score=candidate.capability_score,
-                provider_diversity_score=-provider_counts[candidate.target.provider_id],
+                provider_diversity_score=provider_counts[candidate.target.provider_id],
             )
             for candidate in candidates
         ]

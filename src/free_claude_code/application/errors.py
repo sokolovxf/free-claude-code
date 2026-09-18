@@ -39,3 +39,15 @@ class ApplicationUnavailableError(ApplicationError):
 
     kind = FailureKind.UNAVAILABLE
     status_code = 503
+
+
+class NoFreeRouteAvailableError(ApplicationUnavailableError):
+    """No verified-free route is currently executable under hard-$0 policy.
+
+    Raised only when Smart Router selection is active and none of the
+    configured routes is both explicitly verified free and healthy. The
+    legacy configured (possibly paid or unverified) ordering must never be
+    silently substituted in this situation.
+    """
+
+    status_code = 503

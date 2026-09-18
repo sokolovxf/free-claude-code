@@ -2,8 +2,19 @@ from unittest.mock import patch
 
 import pytest
 
-from free_claude_code.application.errors import UnknownProviderError
+from free_claude_code.application.errors import (
+    NoFreeRouteAvailableError,
+    UnknownProviderError,
+)
+from free_claude_code.application.model_intelligence import (
+    synchronize_model_registry,
+)
+from free_claude_code.application.model_registry import (
+    ModelRegistry,
+)
+from free_claude_code.application.route_health import RouteHealthStore
 from free_claude_code.application.routing import ModelRouter
+from free_claude_code.application.smart_router import SmartRouter
 from free_claude_code.config.provider_catalog import PROVIDER_CATALOG
 from free_claude_code.config.reasoning import ReasoningPreference
 from free_claude_code.config.settings import Settings
@@ -397,3 +408,155 @@ def test_model_router_preserves_typed_error_for_unknown_mapped_provider(settings
     assert str(exc_info.value) == (
         f"Unknown provider_type: 'unknown'. Supported: '{supported}'"
     )
+
+
+@pytest.fixture
+def smart_router():
+    return SmartRouter(ModelRegistry(), RouteHealthStore())
+
+
+def _inject_verified_free(registry, settings):
+    synchronize_model_registry(registry, settings)
+
+
+def test_no_smart_router_keeps_legacy_configured_order(settings):
+    settings.model = "open_router/nvidia/nemotron-3-ultra-550b-a55b:free"
+    settings.model_fallbacks = ("groq/openai/gpt-oss-120b",)
+
+    resolved = ModelRouter(settings).resolve("claude-2.1")
+
+    assert (
+        resolved.primary.provider_model_ref
+        == "open_router/nvidia/nemotron-3-ultra-550b-a55b:free"
+    )
+    assert [target.provider_model_ref for target in resolved.fallbacks] == [
+        "groq/openai/gpt-oss-120b"
+    ]
+
+
+def test_smart_router_raises_when_zero_verified_free_candidates(
+    settings, smart_router
+):
+    # No route is listed in FCC_VERIFIED_FREE_MODELS, so every profile is UNKNOWN.
+    settings.model = "open_router/nvidia/nemotron-3-ultra-550b-a55b:free"
+    settings.model_fallbacks = ("groq/openai/gpt-oss-120b",)
+
+    router = ModelRouter(settings, smart_router=smart_router)
+
+    with pytest.raises(NoFreeRouteAvailableError):
+        router.resolve("claude-2.1")
+
+
+def test_smart_router_raises_when_verified_free_route_is_health_blocked(
+    settings, smart_router
+):
+    settings.model = "open_router/nvidia/nemotron-3-ultra-550b-a55b:free"
+    settings.model_fallbacks = ()
+    settings.verified_free_models = (
+        "open_router/nvidia/nemotron-3-ultra-550b-a55b:free",
+    )
+    smart_router.health.get(
+        "open_router/nvidia/nemotron-3-ultra-550b-a55b:free"
+    ).mark_blocked("quota exhausted")
+
+    router = ModelRouter(settings, smart_router=smart_router)
+
+    with pytest.raises(NoFreeRouteAvailableError):
+        router.resolve("claude-2.1")
+
+
+def test_smart_router_ranks_verified_free_fallback_above_primary(
+    settings, smart_router
+):
+    settings.model = "open_router/nvidia/nemotron-3-ultra-550b-a55b:free"
+    settings.model_fallbacks = ("groq/openai/gpt-oss-120b",)
+    settings.verified_free_models = (
+        "open_router/nvidia/nemotron-3-ultra-550b-a55b:free",
+        "groq/openai/gpt-oss-120b",
+    )
+
+    resolved = ModelRouter(settings, smart_router=smart_router).resolve("claude-2.1")
+
+    # ultra (TIER_1) ranks above gpt-oss (TIER_2); it stays primary.
+    assert (
+        resolved.primary.provider_model_ref
+        == "open_router/nvidia/nemotron-3-ultra-550b-a55b:free"
+    )
+    assert [target.provider_model_ref for target in resolved.fallbacks] == [
+        "groq/openai/gpt-oss-120b"
+    ]
+
+
+def test_smart_router_promotes_higher_capability_fallback_to_primary(
+    settings, smart_router
+):
+    # Lower-capability primary, higher-capability verified-free fallback.
+    settings.model = "groq/openai/gpt-oss-120b"
+    settings.model_fallbacks = ("open_router/nvidia/nemotron-3-ultra-550b-a55b:free",)
+    settings.verified_free_models = (
+        "open_router/nvidia/nemotron-3-ultra-550b-a55b:free",
+        "groq/openai/gpt-oss-120b",
+    )
+
+    resolved = ModelRouter(settings, smart_router=smart_router).resolve("claude-2.1")
+
+    assert (
+        resolved.primary.provider_model_ref
+        == "open_router/nvidia/nemotron-3-ultra-550b-a55b:free"
+    )
+    assert [target.provider_model_ref for target in resolved.fallbacks] == [
+        "groq/openai/gpt-oss-120b"
+    ]
+
+
+def test_smart_router_does_not_promote_unknown_fallback(settings, smart_router):
+    settings.model = "open_router/nvidia/nemotron-3-ultra-550b-a55b:free"
+    settings.model_fallbacks = ("groq/openai/gpt-oss-120b",)
+    settings.verified_free_models = (
+        "open_router/nvidia/nemotron-3-ultra-550b-a55b:free",
+    )
+
+    # The gpt-oss fallback is UNKNOWN -> only the primary is executable.
+    resolved = ModelRouter(settings, smart_router=smart_router).resolve("claude-2.1")
+
+    assert (
+        resolved.primary.provider_model_ref
+        == "open_router/nvidia/nemotron-3-ultra-550b-a55b:free"
+    )
+    assert resolved.fallbacks == ()
+
+
+def test_direct_provider_model_ignores_smart_router(settings, smart_router):
+    # Even with no verified-free routes, an explicit provider/model selection
+    # routes directly and never consults Smart Router.
+    routed = ModelRouter(settings, smart_router=smart_router).resolve_messages_request(
+        MessagesRequest(
+            model="deepseek/deepseek-chat",
+            max_tokens=100,
+            messages=[Message(role="user", content="hello")],
+        )
+    )
+
+    assert routed.resolved.primary.provider_model_ref == "deepseek/deepseek-chat"
+
+
+def test_smart_router_ranking_leaves_configured_order_unchanged(settings, smart_router):
+    # Smart Router may reorder executable candidates at runtime but must never
+    # mutate the operator's stored configuration ordering.
+    settings.model = "groq/openai/gpt-oss-120b"
+    settings.model_fallbacks = ("open_router/nvidia/nemotron-3-ultra-550b-a55b:free",)
+    settings.verified_free_models = (
+        "open_router/nvidia/nemotron-3-ultra-550b-a55b:free",
+        "groq/openai/gpt-oss-120b",
+    )
+
+    original_fallbacks = tuple(settings.model_fallbacks)
+    resolved = ModelRouter(settings, smart_router=smart_router).resolve("claude-2.1")
+
+    assert (
+        resolved.primary.provider_model_ref
+        == "open_router/nvidia/nemotron-3-ultra-550b-a55b:free"
+    )
+    # The configured inventory and order are untouched.
+    assert settings.model == "groq/openai/gpt-oss-120b"
+    assert settings.model_fallbacks == original_fallbacks

@@ -494,6 +494,44 @@ def test_model_fallbacks_reject_blank_and_duplicate_members(value: str) -> None:
         Settings.model_validate({"MODEL_FALLBACKS": value})
 
 
+@pytest.mark.parametrize("value", [None, "", "   ", (), []])
+def test_verified_free_models_empty_values_disable(value: object) -> None:
+    settings = Settings.model_validate({"FCC_VERIFIED_FREE_MODELS": value})
+
+    assert settings.verified_free_models is None
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "open_router/vendor/model-a, groq/vendor/model-b ",
+        ("open_router/vendor/model-a", " groq/vendor/model-b "),
+        ["open_router/vendor/model-a", "groq/vendor/model-b"],
+    ],
+)
+def test_verified_free_models_accepts_aliases_and_trims(value: object) -> None:
+    settings = Settings.model_validate({"FCC_VERIFIED_FREE_MODELS": value})
+
+    assert settings.verified_free_models == (
+        "open_router/vendor/model-a",
+        "groq/vendor/model-b",
+    )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "open_router/vendor/model-a,,groq/vendor/model-b",
+        "open_router/vendor/model-a,open_router/vendor/model-a",
+        "unknown_provider/model",
+        "open_router/",
+    ],
+)
+def test_verified_free_models_rejects_invalid_and_duplicate(value: str) -> None:
+    with pytest.raises(ValidationError):
+        Settings.model_validate({"FCC_VERIFIED_FREE_MODELS": value})
+
+
 @pytest.mark.parametrize(
     "field",
     ["MODEL", "HOST", "WHISPER_MODEL", "LOG_LEVEL", "ANTHROPIC_AUTH_TOKEN"],

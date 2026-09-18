@@ -138,6 +138,20 @@ _NON_PROVIDER_FIELDS: tuple[ConfigFieldSpec, ...] = (
         ),
     ),
     ConfigFieldSpec(
+        "FCC_VERIFIED_FREE_MODELS",
+        "Verified-Free Models",
+        "models",
+        "model_list",
+        settings_attr="verified_free_models",
+        advanced=True,
+        description=(
+            "Exact provider/model refs the operator has explicitly verified are "
+            "available at $0. Smart Router may only execute routes listed here "
+            "under the hard-$0 policy. Use canonical refs, e.g. "
+            "open_router/nvidia/nemotron-3-ultra-550b-a55b:free."
+        ),
+    ),
+    ConfigFieldSpec(
         "REASONING_POLICY",
         "Reasoning Policy",
         "reasoning",

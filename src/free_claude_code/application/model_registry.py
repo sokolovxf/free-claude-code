@@ -4,6 +4,7 @@ This module deliberately contains no live provider calls. It describes what
 FCC knows about a route before health/quota observations are considered.
 """
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import IntEnum, StrEnum
 
@@ -72,6 +73,16 @@ class ModelRegistry:
     def register(self, profile: ModelProfile) -> None:
         """Add or replace a route profile."""
         self._profiles[profile.route_ref] = profile
+
+    def replace_all(self, profiles: Iterable[ModelProfile]) -> None:
+        """Replace the full registered set, mirroring the active configuration.
+
+        Configuration remains the source of truth for which routes exist, so
+        synchronization rebuilds the registry from the current configured
+        inventory rather than only appending. The registry object is mutated
+        in place so a shared SmartRouter reference keeps seeing the new set.
+        """
+        self._profiles = {profile.route_ref: profile for profile in profiles}
 
     def all_profiles(self) -> tuple[ModelProfile, ...]:
         """Return all registered profiles."""
