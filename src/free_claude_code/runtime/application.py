@@ -30,6 +30,7 @@ from free_claude_code.application.model_registry import ModelRegistry
 from free_claude_code.application.ports import StopResult
 from free_claude_code.application.route_health import RouteHealthStore
 from free_claude_code.application.route_health_observer import RouteHealthObserver
+from free_claude_code.application.router_status import build_router_status
 from free_claude_code.application.smart_router import SmartRouter
 from free_claude_code.config.admin.persistence import (
     PreparedAdminUpdate,
@@ -530,6 +531,15 @@ class ApplicationRuntime:
                 for provider_id, model_ids in self.provider_manager.cached_model_ids().items()
             },
         }
+
+    async def admin_router_status(self) -> JsonObject:
+        """Return a read-only snapshot of local routing and health state."""
+        return build_router_status(
+            registry=self._model_registry,
+            health=self._route_health,
+            router=self._smart_router,
+            settings=self.settings,
+        )
 
     async def test_provider(self, provider_id: str) -> JsonObject:
         result = await self.provider_manager.refresh_provider(provider_id)

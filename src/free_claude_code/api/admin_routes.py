@@ -78,6 +78,76 @@ class ConnectedAccountLoginPayload(BaseModel):
     mode: ConnectedAccountLoginMode | None = None
 
 
+class RouterCapability(BaseModel):
+    """Static intelligence for one route, when known."""
+
+    tier: int | None = None
+    tier_name: str | None = None
+    capability_score: float | None = None
+    supports_reasoning: bool | None = None
+    supports_tools: bool | None = None
+    context_window_tokens: int | None = None
+    known: bool = False
+
+
+class RouterFreeEligibility(BaseModel):
+    """Hard-$0 eligibility for one route."""
+
+    eligibility: str | None = None
+    verification_source: str | None = None
+    executable_for_zero_cost: bool = False
+
+
+class RouterHealth(BaseModel):
+    """Dynamic health observations for one route."""
+
+    state: str
+    last_success_at: str | None = None
+    last_failure_at: str | None = None
+    retry_at: str | None = None
+    quarantine_until: str | None = None
+    last_failure_kind: str | None = None
+    last_failure_status: int | None = None
+    last_failure_message: str | None = None
+    consecutive_failures: int = 0
+    success_count: int = 0
+    failure_count: int = 0
+    observed_input_tokens: int = 0
+    observed_output_tokens: int = 0
+    observed_latency_ms: float | None = None
+    updated_at: str
+
+
+class RouterRoute(BaseModel):
+    """One configured route with capability, eligibility, health and rank."""
+
+    provider_model_ref: str
+    provider: str
+    model: str
+    capability: RouterCapability
+    free: RouterFreeEligibility
+    health: RouterHealth
+    executable: bool
+    exclusion_reason: str | None = None
+    rank: int | None = None
+
+
+class RouterStatusSummary(BaseModel):
+    """Aggregate counts across the configured route inventory."""
+
+    total: int
+    executable: int
+    by_state: dict[str, int]
+
+
+class RouterStatusResponse(BaseModel):
+    """Read-only current routing and health snapshot."""
+
+    routes: list[RouterRoute]
+    selected: str | None = None
+    summary: RouterStatusSummary
+
+
 def _asset_path(filename: str) -> Path:
     asset_dir = PACKAGE_ASSETS_DIR if filename == "app-icon.svg" else STATIC_DIR
     path = asset_dir / filename
@@ -146,6 +216,23 @@ async def admin_status(
         response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Vary"] = "Origin"
     return await services.admin.admin_status()
+
+
+@router.get("/admin/api/router/status", response_model=RouterStatusResponse)
+async def router_status(
+    request: Request,
+    response: Response,
+    services: ApiServices = Depends(get_services),
+):
+    """Return the current read-only routing and health snapshot.
+
+    This endpoint only inspects local in-memory state: it performs no provider
+    or network calls and mutates nothing. It reflects the same SmartRouter
+    rules and RouteHealthStore the live request path uses.
+    """
+    require_loopback_admin(request)
+    response.headers["Cache-Control"] = "no-store"
+    return await services.admin.admin_router_status()
 
 
 @router.get("/admin/api/providers/local-status")

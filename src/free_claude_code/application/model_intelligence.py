@@ -306,9 +306,19 @@ def synchronize_model_registry(registry: ModelRegistry, settings: object) -> Non
     """
     verified = tuple(settings.verified_free_models or ())  # type: ignore[attr-defined]
 
-    profiles = tuple(
-        profile_for_configured_route(ref.model_ref, verified)
-        for ref in configured_chat_model_refs(settings)  # type: ignore[arg-type]
-    )
+    profiles = []
+    for ref in configured_chat_model_refs(settings):  # type: ignore[arg-type]
+        profile = profile_for_configured_route(ref.model_ref, verified)
+        existing = registry.get(ref.model_ref)
+        if existing is not None:
+            profile = replace(
+                profile,
+                capability_tier=existing.capability_tier,
+                capability_score=existing.capability_score,
+                supports_reasoning=existing.supports_reasoning,
+                supports_tools=existing.supports_tools,
+                context_window_tokens=existing.context_window_tokens,
+            )
+        profiles.append(profile)
 
     registry.replace_all(profiles)

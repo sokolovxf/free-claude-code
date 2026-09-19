@@ -6,9 +6,10 @@ from free_claude_code.application.model_registry import (
     ModelProfile,
     ModelRegistry,
 )
-from free_claude_code.application.route_health import RouteHealthStore
+from free_claude_code.application.route_health import RouteHealthStore, RouteState
 from free_claude_code.application.routing import ProviderModelTarget
 from free_claude_code.application.smart_router import (
+    ExclusionReason,
     RouteRequirements,
     SmartRouter,
 )
@@ -351,3 +352,320 @@ def test_router_can_exclude_provider():
 
     assert selected is not None
     assert selected.target.provider_id == "cloudflare"
+
+def test_explain_returns_exclusion_reasons_for_all_targets():
+    """explain() must return one explanation per input target with machine-readable reasons."""
+    registry = ModelRegistry(
+        (
+            ModelProfile(
+                provider_id="groq",
+                model_id="model-a",
+                capability_tier=CapabilityTier.TIER_2,
+                capability_score=80.0,
+                free_eligibility=FreeEligibility.VERIFIED_FREE,
+            ),
+            ModelProfile(
+                provider_id="open_router",
+                model_id="model-b",
+                capability_tier=CapabilityTier.TIER_1,
+                capability_score=100.0,
+                free_eligibility=FreeEligibility.UNKNOWN,
+            ),
+        )
+    )
+    health = RouteHealthStore()
+    router = SmartRouter(registry, health)
+
+    explanations = router.explain(
+        (
+            target("groq/model-a"),
+            target("open_router/model-b"),
+            target("unknown/provider"),
+        )
+    )
+
+    assert len(explanations) == 3
+    # groq/model-a: VERIFIED_FREE -> executable
+    assert explanations[0].executable is True
+    assert explanations[0].reason is None
+    assert explanations[0].rank == 1
+    # open_router/model-b: UNKNOWN free -> NOT_VERIFIED_FREE
+    assert explanations[1].executable is False
+    assert explanations[1].reason == ExclusionReason.NOT_VERIFIED_FREE
+    assert explanations[1].rank is None
+    # unknown/provider: not in registry -> NOT_REGISTERED
+    assert explanations[2].executable is False
+    assert explanations[2].reason == ExclusionReason.NOT_REGISTERED
+    assert explanations[2].rank is None
+
+
+def test_explain_preserves_rank_order_matching_rank():
+    """Explain's executable ranks must match rank() output exactly."""
+    registry = ModelRegistry(
+        (
+            ModelProfile(
+                provider_id="groq",
+                model_id="model-a",
+                capability_tier=CapabilityTier.TIER_2,
+                capability_score=80.0,
+                free_eligibility=FreeEligibility.VERIFIED_FREE,
+            ),
+            ModelProfile(
+                provider_id="open_router",
+                model_id="model-b",
+                capability_tier=CapabilityTier.TIER_1,
+                capability_score=100.0,
+                free_eligibility=FreeEligibility.VERIFIED_FREE,
+            ),
+            ModelProfile(
+                provider_id="cloudflare",
+                model_id="model-c",
+                capability_tier=CapabilityTier.TIER_2,
+                capability_score=80.0,
+                free_eligibility=FreeEligibility.VERIFIED_FREE,
+            ),
+        )
+    )
+    health = RouteHealthStore()
+    router = SmartRouter(registry, health)
+
+    targets = (
+        target("groq/model-a"),
+        target("open_router/model-b"),
+        target("cloudflare/model-c"),
+    )
+
+    ranked = router.rank(targets)
+    explained = router.explain(targets)
+
+    # rank() returns TIER_1 first; TIER_2 ties resolved by stable input order
+    ranked_refs = [r.target.provider_model_ref for r in ranked]
+    assert ranked_refs == ["open_router/model-b", "groq/model-a", "cloudflare/model-c"]
+
+    # explain() returns in input order; check rank mapping matches
+    rank_by_ref = {e.target.provider_model_ref: e.rank for e in explained if e.executable}
+    assert rank_by_ref == {
+        "open_router/model-b": 1,
+        "groq/model-a": 2,
+        "cloudflare/model-c": 3,
+    }
+
+
+def test_explain_respects_excluded_providers():
+    """explain() must honor excluded_providers parameter."""
+    registry = ModelRegistry(
+        (
+            ModelProfile(
+                provider_id="groq",
+                model_id="model-a",
+                capability_tier=CapabilityTier.TIER_2,
+                capability_score=80.0,
+                free_eligibility=FreeEligibility.VERIFIED_FREE,
+            ),
+            ModelProfile(
+                provider_id="open_router",
+                model_id="model-b",
+                capability_tier=CapabilityTier.TIER_1,
+                capability_score=100.0,
+                free_eligibility=FreeEligibility.VERIFIED_FREE,
+            ),
+        )
+    )
+    health = RouteHealthStore()
+    router = SmartRouter(registry, health)
+
+    explained = router.explain(
+        (target("groq/model-a"), target("open_router/model-b")),
+        excluded_providers=frozenset({"groq"}),
+    )
+
+    # groq excluded -> PROVIDER_EXCLUDED
+    assert next(e for e in explained if e.target.provider_model_ref == "groq/model-a").reason == ExclusionReason.PROVIDER_EXCLUDED
+    # open_router not excluded -> executable rank 1
+    assert next(e for e in explained if e.target.provider_model_ref == "open_router/model-b").reason is None
+    assert next(e for e in explained if e.target.provider_model_ref == "open_router/model-b").rank == 1
+
+
+def test_explain_respects_reasoning_requirement():
+    """explain() must honor requires_reasoning filter."""
+    registry = ModelRegistry(
+        (
+            ModelProfile(
+                provider_id="groq",
+                model_id="no-reasoning",
+                capability_tier=CapabilityTier.TIER_2,
+                capability_score=80.0,
+                free_eligibility=FreeEligibility.VERIFIED_FREE,
+                supports_reasoning=False,
+            ),
+            ModelProfile(
+                provider_id="open_router",
+                model_id="reasoning",
+                capability_tier=CapabilityTier.TIER_2,
+                capability_score=75.0,
+                free_eligibility=FreeEligibility.VERIFIED_FREE,
+                supports_reasoning=True,
+            ),
+        )
+    )
+    health = RouteHealthStore()
+    router = SmartRouter(registry, health)
+
+    # No reasoning required -> both executable
+    explained = router.explain(
+        (target("groq/no-reasoning"), target("open_router/reasoning")),
+        requirements=RouteRequirements(),
+    )
+    assert all(e.executable for e in explained)
+
+    # Reasoning required -> groq excluded
+    explained = router.explain(
+        (target("groq/no-reasoning"), target("open_router/reasoning")),
+        requirements=RouteRequirements(requires_reasoning=True),
+    )
+    groq_exp = next(e for e in explained if e.target.provider_model_ref == "groq/no-reasoning")
+    or_exp = next(e for e in explained if e.target.provider_model_ref == "open_router/reasoning")
+    assert groq_exp.reason == ExclusionReason.REASONING_REQUIRED
+    assert or_exp.executable is True
+    assert or_exp.rank == 1
+
+
+def test_explain_respects_capability_requirements():
+    """explain() must honor minimum_tier and minimum_capability_score."""
+    registry = ModelRegistry(
+        (
+            ModelProfile(
+                provider_id="groq",
+                model_id="tier2-score80",
+                capability_tier=CapabilityTier.TIER_2,
+                capability_score=80.0,
+                free_eligibility=FreeEligibility.VERIFIED_FREE,
+            ),
+            ModelProfile(
+                provider_id="open_router",
+                model_id="tier1-score90",
+                capability_tier=CapabilityTier.TIER_1,
+                capability_score=90.0,
+                free_eligibility=FreeEligibility.VERIFIED_FREE,
+            ),
+        )
+    )
+    health = RouteHealthStore()
+    router = SmartRouter(registry, health)
+
+    # Require TIER_1 -> groq excluded
+    explained = router.explain(
+        (target("groq/tier2-score80"), target("open_router/tier1-score90")),
+        requirements=RouteRequirements(minimum_tier=CapabilityTier.TIER_1),
+    )
+    groq_exp = next(e for e in explained if e.target.provider_model_ref == "groq/tier2-score80")
+    or_exp = next(e for e in explained if e.target.provider_model_ref == "open_router/tier1-score90")
+    assert groq_exp.reason == ExclusionReason.BELOW_MINIMUM_TIER
+    assert or_exp.executable is True
+
+    # Require score >= 85 -> groq excluded
+    explained = router.explain(
+        (target("groq/tier2-score80"), target("open_router/tier1-score90")),
+        requirements=RouteRequirements(minimum_capability_score=85.0),
+    )
+    groq_exp = next(e for e in explained if e.target.provider_model_ref == "groq/tier2-score80")
+    or_exp = next(e for e in explained if e.target.provider_model_ref == "open_router/tier1-score90")
+    assert groq_exp.reason == ExclusionReason.BELOW_MINIMUM_CAPABILITY_SCORE
+    assert or_exp.executable is True
+
+
+def test_explain_reflects_health_exclusions():
+    """explain() must reflect health state exclusions (BLOCKED, BACKOFF, QUARANTINED)."""
+    from datetime import UTC, datetime, timedelta
+
+    registry = ModelRegistry(
+        (
+            ModelProfile(
+                provider_id="groq",
+                model_id="available",
+                capability_tier=CapabilityTier.TIER_1,
+                capability_score=100.0,
+                free_eligibility=FreeEligibility.VERIFIED_FREE,
+            ),
+            ModelProfile(
+                provider_id="groq",
+                model_id="blocked",
+                capability_tier=CapabilityTier.TIER_1,
+                capability_score=100.0,
+                free_eligibility=FreeEligibility.VERIFIED_FREE,
+            ),
+            ModelProfile(
+                provider_id="groq",
+                model_id="backoff",
+                capability_tier=CapabilityTier.TIER_1,
+                capability_score=100.0,
+                free_eligibility=FreeEligibility.VERIFIED_FREE,
+            ),
+            ModelProfile(
+                provider_id="groq",
+                model_id="quarantined",
+                capability_tier=CapabilityTier.TIER_1,
+                capability_score=100.0,
+                free_eligibility=FreeEligibility.VERIFIED_FREE,
+            ),
+        )
+    )
+    health = RouteHealthStore()
+    router = SmartRouter(registry, health)
+
+    # Mark states
+    health.get("groq/blocked").mark_blocked("billing")
+    health.get("groq/backoff").mark_failure(
+        failure_kind="timeout", retry_at=datetime.now(UTC) + timedelta(minutes=5)
+    )
+    health.get("groq/quarantined").mark_quarantined(until=datetime.now(UTC) + timedelta(minutes=30))
+
+    explained = router.explain(
+        (
+            target("groq/available"),
+            target("groq/blocked"),
+            target("groq/backoff"),
+            target("groq/quarantined"),
+        )
+    )
+
+    available = next(e for e in explained if e.target.provider_model_ref == "groq/available")
+    blocked = next(e for e in explained if e.target.provider_model_ref == "groq/blocked")
+    backoff = next(e for e in explained if e.target.provider_model_ref == "groq/backoff")
+    quarantined = next(e for e in explained if e.target.provider_model_ref == "groq/quarantined")
+
+    assert available.executable is True
+    assert available.rank == 1
+    assert blocked.reason == ExclusionReason.BLOCKED
+    assert backoff.reason == ExclusionReason.BACKOFF
+    assert quarantined.reason == ExclusionReason.QUARANTINED
+
+
+def test_explain_is_pure_no_mutation():
+    """explain() must not mutate registry or health state (pure diagnostic).
+
+    Note: RouteHealthStore.get() auto-creates UNKNOWN entries on first access,
+    which is expected read-side behavior, not a mutation.
+    """
+    registry = ModelRegistry(
+        (
+            ModelProfile(
+                provider_id="groq",
+                model_id="model",
+                capability_tier=CapabilityTier.TIER_2,
+                capability_score=80.0,
+                free_eligibility=FreeEligibility.VERIFIED_FREE,
+            ),
+        )
+    )
+    health = RouteHealthStore()
+    router = SmartRouter(registry, health)
+
+    before_registry = registry.all_profiles()
+
+    router.explain((target("groq/model"),))
+
+    assert registry.all_profiles() == before_registry
+    # Health entries may be auto-created by get(), but their state must remain UNKNOWN
+    for h in health.all():
+        assert h.state is RouteState.UNKNOWN
