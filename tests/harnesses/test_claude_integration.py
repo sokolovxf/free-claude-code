@@ -154,7 +154,7 @@ def test_connect_merges_jsonc_and_disconnect_preserves_unrelated_values(tmp_path
         "KEEP",
         "ANTHROPIC_BASE_URL",
         "ANTHROPIC_AUTH_TOKEN",
-        "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
+        "CLAUDE_CODE_USE_GATEWAY",
         "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
         "DISABLE_AUTOUPDATER",
         "DISABLE_FEEDBACK_COMMAND",
@@ -172,6 +172,37 @@ def test_connect_merges_jsonc_and_disconnect_preserves_unrelated_values(tmp_path
         "editor.fontSize": 16,
         ENV: [{"name": "KEEP", "value": "yes"}],
     }
+
+
+def test_connect_removes_legacy_gateway_discovery_setting(tmp_path):
+    path = tmp_path / "settings.json"
+    path.write_text(
+        json.dumps(
+            {
+                LOGIN: True,
+                ENV: [
+                    {"name": "KEEP", "value": "yes"},
+                    {"name": "ANTHROPIC_BASE_URL", "value": URL},
+                    {"name": "ANTHROPIC_AUTH_TOKEN", "value": TOKEN},
+                    {
+                        "name": "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
+                        "value": "1",
+                    },
+                ],
+            }
+        )
+    )
+    (tmp_path / ".claude.json").write_text('{"hasCompletedOnboarding":true}')
+
+    assert operate(path) == {"connected": False}
+    assert operate(path, True) == {"connected": True}
+    environment = {
+        entry["name"]: entry["value"]
+        for entry in json.loads(path.read_text())[ENV]
+    }
+    assert environment["CLAUDE_CODE_USE_GATEWAY"] == "1"
+    assert "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY" not in environment
+    assert environment["KEEP"] == "yes"
 
 
 def test_missing_file_and_idempotent_operations(tmp_path):
@@ -241,10 +272,7 @@ def test_manual_setup_only_requires_connection_fields(tmp_path, url):
                 ENV: [
                     {"name": "ANTHROPIC_BASE_URL", "value": url},
                     {"name": "ANTHROPIC_AUTH_TOKEN", "value": TOKEN},
-                    {
-                        "name": "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
-                        "value": "1",
-                    },
+                    {"name": "CLAUDE_CODE_USE_GATEWAY", "value": "1"},
                 ],
             }
         )
@@ -260,7 +288,7 @@ def test_manual_setup_only_requires_connection_fields(tmp_path, url):
         ("ANTHROPIC_BASE_URL", "http://localhost:8000/?other=1"),
         ("ANTHROPIC_BASE_URL", "http://user@localhost:8000"),
         ("ANTHROPIC_AUTH_TOKEN", "other"),
-        ("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", "0"),
+        ("CLAUDE_CODE_USE_GATEWAY", "0"),
     ],
 )
 def test_partial_or_different_setup_is_disconnected(tmp_path, field, value):

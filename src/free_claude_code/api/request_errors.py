@@ -7,7 +7,11 @@ from fastapi import HTTPException
 from fastapi.responses import JSONResponse
 from loguru import logger
 
-from free_claude_code.application.errors import ApplicationError, InvalidRequestError
+from free_claude_code.application.errors import (
+    ApplicationError,
+    InvalidRequestError,
+    NoFreeRouteAvailableError,
+)
 from free_claude_code.config.settings import Settings
 from free_claude_code.core.anthropic import (
     anthropic_error_payload,
@@ -23,6 +27,7 @@ from free_claude_code.core.openai_responses import (
 )
 
 WireApi = Literal["messages", "responses"]
+_NO_FREE_ROUTE_HEADERS = {"x-should-retry": "false"}
 
 
 def require_non_empty_messages(messages: Sequence[object]) -> None:
@@ -37,6 +42,11 @@ def ordinary_application_error_response(
     request_id: str,
 ) -> JSONResponse:
     """Serialize a deterministic application error without terminal headers."""
+    headers = (
+        dict(_NO_FREE_ROUTE_HEADERS)
+        if isinstance(error, NoFreeRouteAvailableError)
+        else None
+    )
     if wire_api == "responses":
         return JSONResponse(
             status_code=error.status_code,
@@ -44,6 +54,7 @@ def ordinary_application_error_response(
                 message=error.message,
                 error_type=openai_error_type_for_failure(error.kind),
             ),
+            headers=headers,
         )
     return JSONResponse(
         status_code=error.status_code,
@@ -52,6 +63,7 @@ def ordinary_application_error_response(
             message=error.message,
             request_id=request_id,
         ),
+        headers=headers,
     )
 
 

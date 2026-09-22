@@ -47,6 +47,20 @@ def test_unknown_model_is_conservative():
     assert profile.free_eligibility is FreeEligibility.UNKNOWN
 
 
+def test_parameter_size_infers_tier_for_new_large_models():
+    ultra = profile_for_route("nvidia_nim/qwen/Qwen3.8-2.4T-A95B")
+    large = profile_for_route("huggingface/Qwen/Qwen3-Coder-480B-A35B-Instruct")
+    medium = profile_for_route("nvidia_nim/nvidia/nemotron-4-340b-instruct")
+    small = profile_for_route("siliconflow/Qwen/Qwen3.5-27B")
+
+    assert ultra.capability_tier is CapabilityTier.TIER_1
+    assert large.capability_tier is CapabilityTier.TIER_1
+    assert medium.capability_tier is CapabilityTier.TIER_2
+    assert small.capability_tier is CapabilityTier.TIER_3
+    assert ultra.capability_score > medium.capability_score > small.capability_score
+    assert large.supports_tools is True
+
+
 def test_intelligence_lookup_returns_known_model():
     intelligence = intelligence_for_route(
         "open_router/nvidia/nemotron-3-super-120b-a12b:free"
@@ -226,11 +240,14 @@ def test_synchronize_registry_does_not_invent_a_second_pool():
 
 
 def test_unknown_pool_route_gets_safe_conservative_profile():
-    # A configured route with no static intelligence entry stays conservative:
-    # TIER_4, score 0, UNKNOWN free eligibility.
-    for route_ref in ("ollama_cloud/gemma4:31b", "open_router/openrouter/free"):
-        profile = profile_for_configured_route(route_ref, ())
+    # A route with an explicit size marker gets a coarse inferred tier, while
+    # a route with no static intelligence or size evidence stays conservative.
+    sized = profile_for_configured_route("ollama_cloud/gemma4:31b", ())
+    unknown = profile_for_configured_route("open_router/openrouter/free", ())
 
-        assert profile.capability_tier is CapabilityTier.TIER_4
-        assert profile.capability_score == 0.0
-        assert profile.free_eligibility is FreeEligibility.UNKNOWN
+    assert sized.capability_tier is CapabilityTier.TIER_3
+    assert sized.capability_score > 0.0
+    assert sized.free_eligibility is FreeEligibility.UNKNOWN
+    assert unknown.capability_tier is CapabilityTier.TIER_4
+    assert unknown.capability_score == 0.0
+    assert unknown.free_eligibility is FreeEligibility.UNKNOWN

@@ -38,6 +38,36 @@ def test_messages_fallback_emits_one_lifecycle_with_original_model() -> None:
     assert primary.close_calls == fallback.close_calls == 1
 
 
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    (
+        ("/v1/messages", messages_payload(stream=True)),
+        ("/v1/responses", responses_payload()),
+    ),
+)
+def test_primary_rate_limit_falls_back_before_reaching_client(path, payload) -> None:
+    primary = ControlledFallbackProvider(
+        failure=ExecutionFailure(
+            kind=FailureKind.RATE_LIMIT,
+            status_code=429,
+            message=(
+                "Rate limit exceeded: free-models-per-day. "
+                "Add 10 credits to unlock more requests."
+            ),
+            retryable=True,
+        )
+    )
+    fallback = ControlledFallbackProvider(text="fallback worked")
+
+    with fallback_client(primary, fallback) as client:
+        response = client.post(path, json=payload)
+
+    assert response.status_code == 200
+    assert "fallback worked" in response.text
+    assert "free-models-per-day" not in response.text
+    assert primary.close_calls == fallback.close_calls == 1
+
+
 def test_responses_fallback_emits_one_stable_response_lifecycle() -> None:
     primary = ControlledFallbackProvider(
         failure=execution_failure("primary overloaded")
@@ -166,7 +196,7 @@ def test_lazy_fallback_validation_error_remains_ordinary(
     assert fallback.stream_models == []
 
 
-def test_postframe_failure_never_opens_fallback_for_streaming_messages() -> None:
+def test_scaffolding_only_failure_opens_fallback_for_streaming_messages() -> None:
     first = format_sse_event(
         "message_start",
         {"type": "message_start", "message": {}},
@@ -175,35 +205,35 @@ def test_postframe_failure_never_opens_fallback_for_streaming_messages() -> None
         chunks_before_failure=(first,),
         failure=execution_failure("primary failed after start"),
     )
-    fallback = ControlledFallbackProvider(text="must not run")
+    fallback = ControlledFallbackProvider(text="fallback worked")
 
     with fallback_client(primary, fallback) as client:
         response = client.post("/v1/messages", json=messages_payload(stream=True))
 
     assert response.status_code == 200
     events = parse_sse_text(response.text)
-    assert [event.event for event in events] == ["message_start", "error"]
-    assert fallback.stream_models == []
+    assert [event.event for event in events].count("message_start") == 1
+    assert "fallback worked" in response.text
+    assert fallback.stream_models == ["fallback-model"]
 
 
-def test_postframe_failure_never_opens_fallback_for_responses() -> None:
+def test_scaffolding_only_failure_opens_fallback_for_responses() -> None:
     first = responses_created_event(model="nvidia_nim/primary-model")
     primary = ControlledFallbackProvider(
         responses_chunks_before_failure=(first,),
         failure=execution_failure("primary failed after start"),
+        raise_after_responses_chunks=True,
     )
-    fallback = ControlledFallbackProvider(text="must not run")
+    fallback = ControlledFallbackProvider(text="fallback worked")
 
     with fallback_client(primary, fallback) as client:
         response = client.post("/v1/responses", json=responses_payload())
 
     assert response.status_code == 200
     events = parse_sse_text(response.text)
-    assert [event.event for event in events] == [
-        "response.created",
-        "response.failed",
-    ]
-    assert fallback.stream_models == []
+    assert [event.event for event in events].count("response.created") == 1
+    assert "fallback worked" in response.text
+    assert fallback.stream_models == ["fallback-model"]
 
 
 def test_nonstreaming_partial_failure_discards_content_without_fallback() -> None:

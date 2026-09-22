@@ -212,6 +212,125 @@ def test_http_413_status_wins_over_rate_limit_markers() -> None:
     assert "Request ID: req_too_large" in failure.message
 
 
+def test_http_429_preserves_provider_reset_timestamp() -> None:
+    reset_at = "4102444800000"
+    error = _openai_status_error(
+        openai.RateLimitError,
+        status_code=429,
+        message="free-models-per-day exhausted",
+        body={
+            "error": {
+                "message": "free-models-per-day exhausted",
+                "metadata": {"headers": {"X-RateLimit-Reset": reset_at}},
+            }
+        },
+    )
+
+    failure = classify_provider_failure(
+        error,
+        provider_name="OPENROUTER",
+        read_timeout_s=60.0,
+        request_id="req_quota_reset",
+    )
+
+    assert failure.kind is FailureKind.RATE_LIMIT
+    assert failure.status_code == 429
+    # This is a known free-allocation exhaustion, not temporary throttling:
+    # admission must fail over immediately while retaining the reset time for
+    # route-health quarantine.
+    assert not is_retryable_provider_error(error)
+    assert retryable_upstream_status(error) is None
+    assert failure.retryable is False
+    assert failure.reset_at is not None
+    assert failure.reset_at.timestamp() == 4102444800
+
+
+def test_http_429_accepts_duration_and_iso_reset_formats() -> None:
+    duration_error = _openai_status_error(
+        openai.RateLimitError,
+        status_code=429,
+        message="rate limited",
+        headers={"x-ratelimit-reset": "3600"},
+    )
+    iso_error = _openai_status_error(
+        openai.RateLimitError,
+        status_code=429,
+        message="rate limited",
+        headers={"ratelimit-reset": "2040-01-01T00:00:00Z"},
+    )
+
+    duration_failure = classify_provider_failure(
+        duration_error, provider_name="GROQ", read_timeout_s=60.0, request_id="duration"
+    )
+    iso_failure = classify_provider_failure(
+        iso_error, provider_name="GROQ", read_timeout_s=60.0, request_id="iso"
+    )
+
+    assert duration_failure.reset_at is not None
+    assert duration_failure.reset_at.timestamp() > 0
+    assert iso_failure.reset_at is not None
+    assert iso_failure.reset_at.year == 2040
+
+
+def test_http_429_monthly_quota_fails_over_without_provider_retries() -> None:
+    error = _openai_status_error(
+        openai.RateLimitError,
+        status_code=429,
+        message="You have reached your monthly usage limit.",
+        body={
+            "error": {
+                "message": "You have reached your monthly usage limit.",
+                "type": "rate_limit_exceeded",
+            }
+        },
+    )
+
+    assert not is_retryable_provider_error(error)
+    assert not is_retryable_stream_error(error)
+    assert retryable_upstream_status(error) is None
+
+    failure = classify_provider_failure(
+        error,
+        provider_name="OLLAMA",
+        read_timeout_s=60.0,
+        request_id="req_monthly_quota",
+    )
+
+    assert failure.kind is FailureKind.RATE_LIMIT
+    assert failure.status_code == 429
+    assert failure.retryable is False
+
+
+def test_statusless_429_quota_body_keeps_rate_limit_classification() -> None:
+    error = _statusless_openai_error(
+        "free-models-per-day exhausted",
+        {"error": {"message": "free-models-per-day exhausted", "code": 429}},
+    )
+
+    assert not is_retryable_provider_error(error)
+    failure = classify_provider_failure(
+        error,
+        provider_name="OPENROUTER",
+        read_timeout_s=60.0,
+        request_id="req_statusless_quota",
+    )
+    assert failure.kind is FailureKind.RATE_LIMIT
+    assert failure.status_code == 429
+    assert not failure.retryable
+
+
+def test_http_429_generic_throttle_still_allows_provider_retry() -> None:
+    error = _openai_status_error(
+        openai.RateLimitError,
+        status_code=429,
+        message="Too many requests; please retry shortly.",
+    )
+
+    assert is_retryable_provider_error(error)
+    assert is_retryable_stream_error(error)
+    assert retryable_upstream_status(error) == 429
+
+
 @pytest.mark.parametrize(
     "error",
     [

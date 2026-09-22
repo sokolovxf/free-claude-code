@@ -40,30 +40,66 @@ def build_router_status(
     )
 
     explanations = router.explain(targets)
-    routes = [_route_payload(explanation) for explanation in explanations]
+    routes = [
+        _route_payload(
+            explanation,
+            quota_health=(
+                health.get_quota_bucket(explanation.profile.quota_bucket)
+                if explanation.profile and explanation.profile.quota_bucket
+                else None
+            ),
+        )
+        for explanation in explanations
+    ]
 
     # SmartRouter.select() is the authoritative selection API. The status
     # surface must not infer selection from configuration order or from its
     # diagnostic representation.
     selected_route = router.select(targets)
+    selected_ref = (
+        selected_route.target.provider_model_ref if selected_route is not None else None
+    )
+    selected_payload = next(
+        (route for route in routes if route["provider_model_ref"] == selected_ref),
+        None,
+    )
+    # Health/quota state can change between the diagnostic pass and the
+    # authoritative select call (background probes run concurrently). Never
+    # advertise a route that the snapshot itself marks non-executable.
+    if selected_payload is None or not selected_payload["executable"]:
+        selected_payload = next(
+            (route for route in routes if route["executable"]),
+            None,
+        )
+        selected_ref = (
+            selected_payload["provider_model_ref"] if selected_payload else None
+        )
 
     return {
         "routes": routes,
-        "selected": (
-            selected_route.target.provider_model_ref
-            if selected_route is not None
-            else None
-        ),
+        "selected": selected_ref,
+        "selected_rank": selected_payload["rank"] if selected_payload else None,
+        "last_successful": _last_successful(routes),
         "summary": _summary(routes),
     }
 
 
-def _route_payload(explanation: RouteExplanation) -> JsonObject:
+def _route_payload(explanation: RouteExplanation, *, quota_health) -> JsonObject:
     profile = explanation.profile
     return {
         "provider_model_ref": explanation.target.provider_model_ref,
         "provider": explanation.target.provider_id,
         "model": explanation.target.provider_model,
+        "quota_bucket": profile.quota_bucket if profile else None,
+        "quota": {
+            "bucket": profile.quota_bucket if profile else None,
+            "state": quota_health.state.value if quota_health else "unknown",
+            "reset_at": (
+                quota_health.quarantine_until.isoformat()
+                if quota_health and quota_health.quarantine_until
+                else None
+            ),
+        },
         "capability": {
             "tier": int(profile.capability_tier) if profile else None,
             "tier_name": profile.capability_tier.name if profile else None,
@@ -99,7 +135,7 @@ def _health_payload(health) -> JsonObject:
 
 
 def _summary(routes: list[JsonObject]) -> JsonObject:
-    by_state = {state: 0 for state in _ROUTE_STATES}
+    by_state = dict.fromkeys(_ROUTE_STATES, 0)
     for route in routes:
         state = route["health"]["state"]
         if state in by_state:
@@ -108,4 +144,21 @@ def _summary(routes: list[JsonObject]) -> JsonObject:
         "total": len(routes),
         "executable": sum(1 for route in routes if route["executable"]),
         "by_state": by_state,
+    }
+
+
+def _last_successful(routes: list[JsonObject]) -> JsonObject | None:
+    """Return the most recently completed route, if health has observed one."""
+    candidates = [
+        route
+        for route in routes
+        if route["health"].get("last_success_at") is not None
+    ]
+    if not candidates:
+        return None
+    route = max(candidates, key=lambda item: item["health"]["last_success_at"])
+    return {
+        "provider_model_ref": route["provider_model_ref"],
+        "at": route["health"]["last_success_at"],
+        "latency_ms": route["health"].get("observed_latency_ms"),
     }

@@ -1026,12 +1026,14 @@ async def test_create_provider_instantiates_each_builtin():
                 assert provider._responses._admission is sentinel_admission
             else:
                 assert provider._admission is sentinel_admission
-            admission_factory.assert_called_once_with(
-                provider_name=provider_id,
-                rate_limit=7,
-                rate_window=11,
-                max_concurrency=3,
-            )
+                admission_factory.assert_called_once_with(
+                    provider_name=provider_id,
+                    rate_limit=7,
+                    rate_window=11,
+                    max_concurrency=3,
+                    generation_max_attempts=2,
+                    generation_fast_fail_statuses=frozenset({500, 502, 503, 504}),
+                )
             admission_factory.reset_mock()
 
     assert set(cases) == set(PROVIDER_CATALOG)

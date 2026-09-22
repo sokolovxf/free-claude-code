@@ -5,6 +5,7 @@ import ssl
 from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -23,6 +24,28 @@ from free_claude_code.core.failures import ExecutionFailure, FailureKind
 ProviderFailureOverride = Callable[[Exception], ExecutionFailure | None]
 
 _RATE_LIMIT_MARKERS = frozenset({"rate_limit", "rate limit", "too many requests"})
+# A provider can report a quota exhaustion as HTTP 429 even though retrying the
+# same request cannot help. Keep this deliberately explicit: ordinary 429
+# throttling remains retryable, while known allocation/quota failures should
+# fall through to the next route immediately.
+_QUOTA_EXHAUSTION_MARKERS = frozenset(
+    {
+        "quota",
+        "daily limit",
+        "monthly limit",
+        "daily usage limit",
+        "monthly usage limit",
+        "usage limit",
+        "free-models-per-day",
+        "free models per day",
+        "credits exhausted",
+        "insufficient credits",
+        "insufficient_quota",
+        "insufficient user quota",
+        "out of credits",
+        "allocation exhausted",
+    }
+)
 _OVERLOAD_MARKERS = frozenset(
     {
         "resourceexhausted",
@@ -177,6 +200,10 @@ def retryable_transient_status(exc: BaseException) -> int | None:
     if _reports_context_window_exceeded(exc):
         return None
     if _reported_status(exc) == 413:
+        return None
+    if _reported_status(exc) == 429 and _has_quota_exhaustion_marker(
+        transient_error_text(exc)
+    ):
         return None
     if isinstance(exc, openai.RateLimitError):
         return 429
@@ -355,7 +382,13 @@ def _classify_provider_failure(
     if provider_authentication_status(exc) == 403:
         return _failure(FailureKind.PERMISSION, 403, _PERMISSION_MESSAGE, False)
     if isinstance(exc, openai.RateLimitError):
-        return _failure(FailureKind.RATE_LIMIT, 429, _RATE_LIMIT_MESSAGE, True)
+        return _failure(
+            FailureKind.RATE_LIMIT,
+            429,
+            _RATE_LIMIT_MESSAGE,
+            is_retryable_provider_error(exc),
+            reset_at=_provider_reset_at(exc),
+        )
     if isinstance(exc, openai.BadRequestError):
         return _failure(
             FailureKind.INVALID_REQUEST, 400, _INVALID_REQUEST_MESSAGE, False
@@ -378,8 +411,14 @@ def _classify_provider_failure(
         return _failure(FailureKind.UPSTREAM, 500, _stable_upstream(500), True)
     if isinstance(exc, openai.APIError):
         status = retryable_transient_status(exc)
-        if status == 429:
-            return _failure(FailureKind.RATE_LIMIT, 429, _RATE_LIMIT_MESSAGE, True)
+        if status == 429 or _reported_status(exc) == 429:
+            return _failure(
+                FailureKind.RATE_LIMIT,
+                429,
+                _RATE_LIMIT_MESSAGE,
+                is_retryable_provider_error(exc),
+                reset_at=_provider_reset_at(exc),
+            )
         if is_transient_overload_error(exc):
             return overloaded_provider_failure()
         effective_status = status or getattr(exc, "status_code", None)
@@ -411,7 +450,13 @@ def _classify_provider_failure(
         if status == 403:
             return _failure(FailureKind.PERMISSION, 403, _PERMISSION_MESSAGE, False)
         if status == 429:
-            return _failure(FailureKind.RATE_LIMIT, 429, _RATE_LIMIT_MESSAGE, True)
+            return _failure(
+                FailureKind.RATE_LIMIT,
+                429,
+                _RATE_LIMIT_MESSAGE,
+                is_retryable_provider_error(exc),
+                reset_at=_provider_reset_at(exc),
+            )
         if status == 400:
             return _failure(
                 FailureKind.INVALID_REQUEST, 400, _INVALID_REQUEST_MESSAGE, False
@@ -445,13 +490,78 @@ def _failure(
     status_code: int,
     message: str,
     retryable: bool,
+    *,
+    reset_at: datetime | None = None,
 ) -> ExecutionFailure:
     return ExecutionFailure(
         kind=kind,
         status_code=status_code,
         message=message,
         retryable=retryable,
+        reset_at=reset_at,
     )
+
+
+def _provider_reset_at(exc: Exception) -> datetime | None:
+    """Read a provider rate-limit reset timestamp without requiring one SDK type."""
+    sources = [
+        getattr(exc, "headers", None),
+        getattr(getattr(exc, "response", None), "headers", None),
+        getattr(exc, "body", None),
+    ]
+    reset = _nested_value(
+        sources,
+        {
+            "x-ratelimit-reset",
+            "x-rate-limit-reset",
+            "x-ratelimit-reset-requests",
+            "x-ratelimit-reset-tokens",
+            "ratelimit-reset",
+            "rate-limit-reset",
+        },
+    )
+    if reset is not None:
+        if isinstance(reset, str):
+            try:
+                return datetime.fromisoformat(reset.replace("Z", "+00:00")).astimezone(UTC)
+            except ValueError:
+                pass
+        try:
+            timestamp = float(reset)
+            if timestamp > 100_000_000_000:
+                timestamp /= 1000
+            # Providers variously report an epoch timestamp or a duration.
+            # Values in the past/far before the current epoch are durations.
+            if timestamp < 100_000_000:
+                timestamp = datetime.now(UTC).timestamp() + max(timestamp, 0)
+            return datetime.fromtimestamp(timestamp, UTC)
+        except (TypeError, ValueError, OverflowError, OSError):
+            pass
+
+    retry_after = _nested_value(sources, {"retry-after"})
+    if retry_after is not None:
+        try:
+            seconds = float(retry_after)
+            if seconds >= 0:
+                return datetime.now(UTC) + timedelta(seconds=seconds)
+        except (TypeError, ValueError, OverflowError):
+            pass
+    return None
+
+
+def _nested_value(values: object, keys: set[str]) -> object | None:
+    """Find a case-insensitive header-like value in nested provider payloads."""
+    if isinstance(values, Mapping):
+        for key, value in values.items():
+            if str(key).casefold() in keys:
+                return value
+            if (nested := _nested_value(value, keys)) is not None:
+                return nested
+    elif isinstance(values, list | tuple):
+        for value in values:
+            if (nested := _nested_value(value, keys)) is not None:
+                return nested
+    return None
 
 
 def _stable_upstream(status_code: int) -> str:
@@ -561,6 +671,11 @@ def _body_to_text(body: Any) -> str:
 
 def _has_marker(text: str, markers: frozenset[str]) -> bool:
     return any(marker in text for marker in markers)
+
+
+def _has_quota_exhaustion_marker(exc: BaseException) -> bool:
+    """Return whether a 429 carries an explicit exhausted-allocation signal."""
+    return _has_marker(transient_error_text(exc), _QUOTA_EXHAUSTION_MARKERS)
 
 
 def underlying_provider_error(exc: Exception) -> Exception:

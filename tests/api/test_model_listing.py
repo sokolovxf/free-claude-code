@@ -251,7 +251,7 @@ def test_direct_model_views_exclude_claude_aliases_and_duplicate_variants():
             "xhigh",
             "max",
         ],
-        "inferenceIdleTimeoutSecs": 660,
+            "inferenceIdleTimeoutSecs": 105,
     }
     plain = responses["data"][1]
     assert plain["supportsReasoningEffort"] is False

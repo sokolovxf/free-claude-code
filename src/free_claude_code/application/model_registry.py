@@ -40,6 +40,7 @@ class ModelProfile:
     supports_reasoning: bool | None = None
     supports_tools: bool | None = None
     context_window_tokens: int | None = None
+    quota_bucket: str | None = None
 
     @property
     def route_ref(self) -> str:
@@ -50,6 +51,14 @@ class ModelProfile:
     def executable_for_zero_cost(self) -> bool:
         """Return whether this route may execute under hard-$0 policy."""
         return self.free_eligibility is FreeEligibility.VERIFIED_FREE
+
+
+def quota_bucket_for_route(route_ref: str) -> str | None:
+    """Return a shared quota bucket for providers with account-level free limits."""
+    provider_id, separator, _ = route_ref.partition("/")
+    if separator and provider_id == "open_router":
+        return "openrouter_free_tier_daily"
+    return None
 
 
 class ModelRegistry:

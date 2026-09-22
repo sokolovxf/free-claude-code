@@ -35,6 +35,8 @@ def _controller(
     rate_window: float = 1.0,
     max_concurrency: int = 1_000,
     max_attempts: int = UPSTREAM_TRANSIENT_TOTAL_ATTEMPTS,
+    generation_max_attempts: int | None = None,
+    generation_fast_fail_statuses: frozenset[int] | None = None,
     base_delay: float = 0.0,
     max_delay: float = 0.0,
 ) -> ProviderAdmissionController:
@@ -44,6 +46,8 @@ def _controller(
         rate_window=rate_window,
         max_concurrency=max_concurrency,
         max_attempts=max_attempts,
+        generation_max_attempts=generation_max_attempts,
+        generation_fast_fail_statuses=generation_fast_fail_statuses,
         base_delay=base_delay,
         max_delay=max_delay,
         jitter=0.0,
@@ -62,6 +66,21 @@ def _status_error(
         f"upstream returned {status}",
         request=request,
         response=response,
+    )
+
+
+def _openai_quota_error() -> openai.RateLimitError:
+    request = httpx2.Request("POST", "https://provider.test/chat/completions")
+    response = httpx2.Response(429, request=request)
+    return openai.RateLimitError(
+        "You have reached your monthly usage limit.",
+        response=response,
+        body={
+            "error": {
+                "message": "You have reached your monthly usage limit.",
+                "type": "rate_limit_exceeded",
+            }
+        },
     )
 
 
@@ -312,6 +331,78 @@ async def test_run_call_uses_one_five_attempt_budget(error: Exception) -> None:
 
 
 @pytest.mark.asyncio
+async def test_generation_can_use_a_shorter_transient_retry_budget() -> None:
+    controller = _controller(generation_max_attempts=2)
+    attempts = 0
+    error = _status_error(503)
+
+    async def fail() -> None:
+        nonlocal attempts
+        attempts += 1
+        raise error
+
+    with pytest.raises(httpx.HTTPStatusError) as exc_info:
+        await controller.start_execution().run_call(
+            fail,
+            operation_kind=ProviderOperationKind.GENERATION,
+        )
+
+    assert attempts == 2
+    assert exc_info.value is error
+
+
+@pytest.mark.asyncio
+async def test_generation_fast_fails_configured_upstream_server_errors() -> None:
+    controller = _controller(
+        generation_max_attempts=2,
+        generation_fast_fail_statuses=frozenset({500, 502, 503, 504}),
+    )
+    attempts = 0
+    error = _status_error(503)
+
+    async def fail() -> None:
+        nonlocal attempts
+        attempts += 1
+        raise error
+
+    with pytest.raises(httpx.HTTPStatusError) as exc_info:
+        await controller.start_execution().run_call(
+            fail,
+            operation_kind=ProviderOperationKind.GENERATION,
+        )
+
+    assert attempts == 1
+    assert exc_info.value is error
+
+
+@pytest.mark.asyncio
+async def test_generation_still_retries_statuses_not_marked_fast_fail() -> None:
+    controller = _controller(
+        generation_max_attempts=2,
+        generation_fast_fail_statuses=frozenset({500}),
+        base_delay=0.0,
+    )
+    attempts = 0
+    error = _status_error(429)
+
+    async def recover() -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise error
+        return "ok"
+
+    assert (
+        await controller.start_execution().run_call(
+            recover,
+            operation_kind=ProviderOperationKind.GENERATION,
+        )
+        == "ok"
+    )
+    assert attempts == 2
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "error",
     [_status_error(429), ssl.SSLWantReadError("read would block")],
@@ -339,6 +430,27 @@ async def test_run_call_succeeds_without_multiplying_attempts(error: Exception) 
         == "recovered"
     )
     assert attempts == 3
+
+
+@pytest.mark.asyncio
+async def test_run_call_fails_over_immediately_for_explicit_quota_exhaustion() -> None:
+    controller = _controller()
+    attempts = 0
+    error = _openai_quota_error()
+
+    async def fail() -> None:
+        nonlocal attempts
+        attempts += 1
+        raise error
+
+    with pytest.raises(openai.RateLimitError) as exc_info:
+        await controller.start_execution().run_call(
+            fail,
+            operation_kind=ProviderOperationKind.GENERATION,
+        )
+
+    assert attempts == 1
+    assert exc_info.value is error
 
 
 @pytest.mark.asyncio

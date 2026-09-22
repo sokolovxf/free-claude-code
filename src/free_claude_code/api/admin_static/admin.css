@@ -536,6 +536,14 @@ button.startup-busy::before,
   flex-direction: column;
   gap: 8px;
   align-content: start;
+  min-width: 0;
+}
+
+/* Long model pools (including Verified-Free Models in Advanced) are full-row
+   editors. Keeping them in a narrow auto-fit column makes descriptions and
+   provider/model refs wrap one word per line. */
+.field.model-list-field {
+  grid-column: 1 / -1;
 }
 
 .field label {
@@ -543,6 +551,7 @@ button.startup-busy::before,
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  min-width: 0;
   font-size: 13px;
   font-weight: 700;
   color: var(--text-strong);
@@ -766,6 +775,8 @@ button.startup-busy::before,
   font-size: 12px;
   line-height: 1.4;
   margin-top: 2px;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 /* Show/Hide Advanced fields */

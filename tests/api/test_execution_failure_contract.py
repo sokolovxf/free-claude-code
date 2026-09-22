@@ -887,16 +887,9 @@ def test_responses_application_progress_timeout_closes_committed_lifecycle() -> 
         response = client.post("/v1/responses", json=_responses_payload())
 
     request_id = response.headers["request-id"]
-    events = parse_sse_text(response.text)
-    assert response.status_code == 200
-    assert [event.event for event in events] == [
-        "response.created",
-        "response.failed",
-    ]
-    assert events[-1].data["sequence_number"] == 1
-    failed = events[-1].data["response"]
-    assert failed["id"] == response_id
-    assert failed["status"] == "failed"
+    assert response.status_code == 504
+    assert response.headers["x-should-retry"] == "false"
+    failed = response.json()
     assert failed["error"] == {
         "message": (
             "Provider execution made no progress for 0.02 seconds.\n\n"

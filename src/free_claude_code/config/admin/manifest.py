@@ -138,6 +138,21 @@ _NON_PROVIDER_FIELDS: tuple[ConfigFieldSpec, ...] = (
         ),
     ),
     ConfigFieldSpec(
+        "SMART_ROUTER_POLICY",
+        "Smart Router Policy",
+        "models",
+        "select",
+        settings_attr="smart_router_policy",
+        options=(
+            ConfigOptionSpec("quality", "Best model first"),
+            ConfigOptionSpec("fastest", "Fastest healthy model"),
+        ),
+        description=(
+            "Quality keeps capability tiers first. Fastest prioritizes measured "
+            "latency, then uses capability as a tie-breaker."
+        ),
+    ),
+    ConfigFieldSpec(
         "FCC_VERIFIED_FREE_MODELS",
         "Verified-Free Models",
         "models",

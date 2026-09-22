@@ -98,6 +98,14 @@ class RouterFreeEligibility(BaseModel):
     executable_for_zero_cost: bool = False
 
 
+class RouterQuota(BaseModel):
+    """Shared provider quota state for one route."""
+
+    bucket: str | None = None
+    state: str = "unknown"
+    reset_at: str | None = None
+
+
 class RouterHealth(BaseModel):
     """Dynamic health observations for one route."""
 
@@ -115,6 +123,9 @@ class RouterHealth(BaseModel):
     observed_input_tokens: int = 0
     observed_output_tokens: int = 0
     observed_latency_ms: float | None = None
+    probe_required: bool = False
+    probe_successes: int = 0
+    last_probe_at: str | None = None
     updated_at: str
 
 
@@ -124,6 +135,8 @@ class RouterRoute(BaseModel):
     provider_model_ref: str
     provider: str
     model: str
+    quota_bucket: str | None = None
+    quota: RouterQuota
     capability: RouterCapability
     free: RouterFreeEligibility
     health: RouterHealth
@@ -145,6 +158,8 @@ class RouterStatusResponse(BaseModel):
 
     routes: list[RouterRoute]
     selected: str | None = None
+    selected_rank: int | None = None
+    last_successful: dict[str, object] | None = None
     summary: RouterStatusSummary
 
 

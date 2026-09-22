@@ -1,6 +1,6 @@
 """Pure, validated application settings schema."""
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import (
     BaseModel,
@@ -396,6 +396,10 @@ class Settings(BaseModel):
         default=None,
         validation_alias="FCC_VERIFIED_FREE_MODELS",
     )
+    smart_router_policy: Literal["quality", "fastest"] = Field(
+        default="quality",
+        validation_alias="SMART_ROUTER_POLICY",
+    )
 
     # ==================== Per-Provider Proxy ====================
     openai_proxy: OptionalNonEmptyString = Field(
@@ -557,7 +561,10 @@ class Settings(BaseModel):
         default=2, validation_alias="PROVIDER_MAX_CONCURRENCY"
     )
     provider_progress_timeout: float = Field(
-        default=600.0,
+        # A provider that produces no token/event for 45s is not allowed to
+        # hold a foreground Claude request indefinitely. Providers that stream
+        # reasoning keep extending this deadline as progress arrives.
+        default=45.0,
         gt=0,
         # Responses metadata adds 60 seconds before encoding this as a u64.
         # The next representable float below 2**64 leaves more than that margin.

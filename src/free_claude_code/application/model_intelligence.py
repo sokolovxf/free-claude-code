@@ -16,7 +16,13 @@ from datetime import UTC, datetime
 
 from free_claude_code.config.model_refs import configured_chat_model_refs
 
-from .model_registry import CapabilityTier, FreeEligibility, ModelProfile, ModelRegistry
+from .model_registry import (
+    CapabilityTier,
+    FreeEligibility,
+    ModelProfile,
+    ModelRegistry,
+    quota_bucket_for_route,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,6 +188,10 @@ MODEL_INTELLIGENCE: tuple[ModelIntelligence, ...] = (
 )
 
 _TOKEN_PATTERN = re.compile(r"[^0-9a-z]+")
+_PARAMETER_SIZE_PATTERN = re.compile(
+    r"(?<![a-z0-9])(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>[tbm])(?:b)?(?![a-z0-9])",
+    re.IGNORECASE,
+)
 
 
 def _tokens(value: str) -> tuple[str, ...]:
@@ -249,11 +259,14 @@ def profile_for_route(route_ref: str) -> ModelProfile:
     intelligence = intelligence_for_route(route_ref)
 
     if intelligence is None:
+        if (parameter_profile := _parameter_profile(provider_id, model_id)) is not None:
+            return parameter_profile
         return ModelProfile(
             provider_id=provider_id,
             model_id=model_id,
             capability_tier=CapabilityTier.TIER_4,
             capability_score=0.0,
+            quota_bucket=quota_bucket_for_route(route_ref),
         )
 
     return ModelProfile(
@@ -264,6 +277,48 @@ def profile_for_route(route_ref: str) -> ModelProfile:
         supports_reasoning=intelligence.supports_reasoning,
         supports_tools=intelligence.supports_tools,
         context_window_tokens=intelligence.context_window_tokens,
+        quota_bucket=quota_bucket_for_route(route_ref),
+    )
+
+
+def _parameter_profile(provider_id: str, model_id: str) -> ModelProfile | None:
+    """Infer a conservative tier from an explicit parameter-size suffix.
+
+    Provider catalogs expose many new model families before FCC has a hand
+    written intelligence entry. A size marker is safe evidence for coarse
+    tiering (``2.4T``, ``550B``, ``120B``, ``30B``); names without one remain
+    conservative Tier 4. Static family entries above always take precedence.
+    """
+    sizes_billions = []
+    for match in _PARAMETER_SIZE_PATTERN.finditer(model_id):
+        value = float(match.group("value"))
+        unit = match.group("unit").casefold()
+        multiplier = {"t": 1000.0, "b": 1.0, "m": 0.001}[unit]
+        sizes_billions.append(value * multiplier)
+    if not sizes_billions:
+        return None
+
+    parameters = max(sizes_billions)
+    if parameters >= 400:
+        tier = CapabilityTier.TIER_1
+        score = min(100.0, 95.0 + (parameters - 400.0) / 100.0)
+    elif parameters >= 100:
+        tier = CapabilityTier.TIER_2
+        score = 75.0 + min(19.0, (parameters - 100.0) / 300.0 * 19.0)
+    elif parameters >= 27:
+        tier = CapabilityTier.TIER_3
+        score = 55.0 + min(19.0, (parameters - 27.0) / 73.0 * 19.0)
+    else:
+        tier = CapabilityTier.TIER_4
+        score = 20.0 + min(34.0, parameters / 27.0 * 34.0)
+
+    return ModelProfile(
+        provider_id=provider_id,
+        model_id=model_id,
+        capability_tier=tier,
+        capability_score=round(score, 3),
+        supports_tools=True,
+        quota_bucket=quota_bucket_for_route(f"{provider_id}/{model_id}"),
     )
 
 
@@ -288,6 +343,7 @@ def profile_for_configured_route(
             free_eligibility=FreeEligibility.VERIFIED_FREE,
             verification_source="FCC_VERIFIED_FREE_MODELS",
             last_verified=(now or datetime.now(UTC)).isoformat(),
+            quota_bucket=quota_bucket_for_route(route_ref),
         )
 
     return profile
@@ -318,6 +374,7 @@ def synchronize_model_registry(registry: ModelRegistry, settings: object) -> Non
                 supports_reasoning=existing.supports_reasoning,
                 supports_tools=existing.supports_tools,
                 context_window_tokens=existing.context_window_tokens,
+                quota_bucket=existing.quota_bucket or profile.quota_bucket,
             )
         profiles.append(profile)
 

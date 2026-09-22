@@ -14,7 +14,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
-$RepoArchiveUrl = "https://github.com/Alishahryar1/free-claude-code/archive/refs/heads/main.zip"
+$RepoArchiveUrl = "https://github.com/sokolovxf/free-claude-code/archive/refs/heads/smart-router-v2.zip"
 # Windows on ARM emulates x64, whose Python package ecosystem has broader wheel support.
 $PythonRequest = "cpython-3.14.0-windows-x86_64-none"
 $MinUvVersion = "0.12.13"
@@ -26,7 +26,7 @@ $HermesInstallUrl = "https://hermes-agent.nousresearch.com/install.ps1"
 $DshVersion = "0.1.0-rc.8"
 $DshPackage = "@deepseek-ai/dsh@$DshVersion"
 $GrokInstallUrl = "https://x.ai/cli/install.ps1"
-$MuseInstallUrl = "https://raw.githubusercontent.com/Alishahryar1/free-claude-code/main/scripts/install-muse.ps1"
+$MuseInstallUrl = "https://raw.githubusercontent.com/sokolovxf/free-claude-code/smart-router-v2/scripts/install-muse.ps1"
 $RtkVersion = "0.44.2"
 $RtkReleaseBaseUrl = "https://github.com/rtk-ai/rtk/releases/download/v$RtkVersion"
 $RtkWindowsAssetName = "rtk-x86_64-pc-windows-msvc.zip"

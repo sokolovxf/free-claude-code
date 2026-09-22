@@ -434,17 +434,22 @@ def test_no_smart_router_keeps_legacy_configured_order(settings):
     ]
 
 
-def test_smart_router_raises_when_zero_verified_free_candidates(
+def test_smart_router_routes_configured_unknown_cost_candidates(
     settings, smart_router
 ):
-    # No route is listed in FCC_VERIFIED_FREE_MODELS, so every profile is UNKNOWN.
+    # No route is listed in FCC_VERIFIED_FREE_MODELS, but configured routes remain
+    # eligible when their availability state is healthy.
     settings.model = "open_router/nvidia/nemotron-3-ultra-550b-a55b:free"
     settings.model_fallbacks = ("groq/openai/gpt-oss-120b",)
 
     router = ModelRouter(settings, smart_router=smart_router)
 
-    with pytest.raises(NoFreeRouteAvailableError):
-        router.resolve("claude-2.1")
+    resolved = router.resolve("claude-2.1")
+
+    assert resolved.primary.provider_model_ref == (
+        "open_router/nvidia/nemotron-3-ultra-550b-a55b:free"
+    )
+    assert len(resolved.fallbacks) == 1
 
 
 def test_smart_router_raises_when_verified_free_route_is_health_blocked(
@@ -509,21 +514,24 @@ def test_smart_router_promotes_higher_capability_fallback_to_primary(
     ]
 
 
-def test_smart_router_does_not_promote_unknown_fallback(settings, smart_router):
+def test_smart_router_keeps_configured_unknown_fallback(settings, smart_router):
     settings.model = "open_router/nvidia/nemotron-3-ultra-550b-a55b:free"
     settings.model_fallbacks = ("groq/openai/gpt-oss-120b",)
     settings.verified_free_models = (
         "open_router/nvidia/nemotron-3-ultra-550b-a55b:free",
     )
 
-    # The gpt-oss fallback is UNKNOWN -> only the primary is executable.
+    # The gpt-oss fallback remains available because configuration is the
+    # execution candidate source of truth.
     resolved = ModelRouter(settings, smart_router=smart_router).resolve("claude-2.1")
 
     assert (
         resolved.primary.provider_model_ref
         == "open_router/nvidia/nemotron-3-ultra-550b-a55b:free"
     )
-    assert resolved.fallbacks == ()
+    assert [target.provider_model_ref for target in resolved.fallbacks] == [
+        "groq/openai/gpt-oss-120b"
+    ]
 
 
 def test_direct_provider_model_ignores_smart_router(settings, smart_router):

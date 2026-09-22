@@ -260,6 +260,12 @@ def prepare_provider(
             rate_limit=config.rate_limit,
             rate_window=config.rate_window,
             max_concurrency=config.max_concurrency,
+            # Give generation one recovery probe, then let SmartRouter move on.
+            # Discovery keeps the normal retry budget.
+            generation_max_attempts=2,
+            # A provider-side 5xx is unlikely to improve during this request.
+            # Background route probes can rehabilitate it without blocking the user.
+            generation_fast_fail_statuses=frozenset({500, 502, 503, 504}),
         )
         if factory is not None:
             return factory(config, settings, admission)

@@ -328,8 +328,13 @@ class ProviderAttempt:
             self._permit,
             error=error,
             status=status,
+            operation_kind=self._claim.operation_kind,
         )
-        retry_allowed = self._execution.can_attempt
+        retry_allowed = self._controller._can_retry(
+            self._execution,
+            self._claim.operation_kind,
+            status=status,
+        )
         if not retry_allowed:
             self._execution.fail(error)
         self._resolve(
@@ -412,6 +417,8 @@ class ProviderAdmissionController:
         rate_window: float = 60.0,
         max_concurrency: int = 5,
         max_attempts: int = UPSTREAM_TRANSIENT_TOTAL_ATTEMPTS,
+        generation_max_attempts: int | None = None,
+        generation_fast_fail_statuses: frozenset[int] | None = None,
         base_delay: float = DEFAULT_UPSTREAM_BASE_DELAY,
         max_delay: float = DEFAULT_UPSTREAM_MAX_DELAY,
         jitter: float = DEFAULT_UPSTREAM_JITTER,
@@ -424,6 +431,12 @@ class ProviderAdmissionController:
             raise ValueError("max_concurrency must be > 0")
         if max_attempts <= 0:
             raise ValueError("max_attempts must be > 0")
+        if generation_max_attempts is not None and generation_max_attempts <= 0:
+            raise ValueError("generation_max_attempts must be > 0")
+        if generation_fast_fail_statuses is not None and any(
+            status < 100 or status > 599 for status in generation_fast_fail_statuses
+        ):
+            raise ValueError("generation_fast_fail_statuses must contain HTTP statuses")
         if base_delay < 0:
             raise ValueError("base_delay must be >= 0")
         if max_delay < base_delay:
@@ -433,6 +446,8 @@ class ProviderAdmissionController:
 
         self._provider_name = provider_name
         self._max_attempts = max_attempts
+        self._generation_max_attempts = generation_max_attempts
+        self._generation_fast_fail_statuses = generation_fast_fail_statuses or frozenset()
         self._base_delay = base_delay
         self._max_delay = max_delay
         self._jitter = jitter
@@ -445,13 +460,57 @@ class ProviderAdmissionController:
         self._next_generation = 1
         logger.info(
             "Provider admission initialized for {} ({} req / {}s, "
-            "max_concurrency={}, max_attempts={})",
+            "max_concurrency={}, max_attempts={}, generation_max_attempts={})",
             provider_name,
             rate_limit,
             rate_window,
             max_concurrency,
             max_attempts,
+            generation_max_attempts,
         )
+
+    def _can_retry(
+        self,
+        execution: ProviderExecution,
+        operation_kind: ProviderOperationKind,
+        *,
+        status: int | None = None,
+    ) -> bool:
+        """Return whether this operation may spend another transient retry.
+
+        Generation requests have a deliberately smaller opening-failure budget
+        than catalog discovery. A failed route should yield to the router after
+        one recovery probe; it must not hold a user's request in a five-attempt
+        exponential-backoff loop. This only applies before a provider attempt
+        is accepted. Once a stream has started, stream recovery owns its policy.
+        """
+        if not execution.can_attempt:
+            return False
+        if (
+            status is not None
+            and status in self._generation_fast_fail_statuses
+            and operation_kind
+            in {
+                ProviderOperationKind.GENERATION,
+                ProviderOperationKind.CONTINUATION,
+                ProviderOperationKind.TOOL_REPAIR,
+            }
+        ):
+            return False
+        if (
+            self._generation_max_attempts is not None
+            and operation_kind
+            in {
+                ProviderOperationKind.GENERATION,
+                ProviderOperationKind.CONTINUATION,
+                ProviderOperationKind.TOOL_REPAIR,
+            }
+        ):
+            return execution.attempts_started < min(
+                execution.max_attempts,
+                self._generation_max_attempts,
+            )
+        return True
 
     def start_execution(
         self,
@@ -714,8 +773,9 @@ class ProviderAdmissionController:
         *,
         error: Exception,
         status: int | None,
+        operation_kind: ProviderOperationKind,
     ) -> None:
-        can_retry = execution.can_attempt
+        can_retry = self._can_retry(execution, operation_kind, status=status)
         delay = self._retry_delay(error, execution.attempts_started)
         became_leader = False
         exhausted_episode = False

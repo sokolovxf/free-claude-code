@@ -1,6 +1,7 @@
 """Protocol-neutral execution failure semantics."""
 
 from dataclasses import FrozenInstanceError, dataclass
+from datetime import datetime
 from enum import StrEnum
 
 
@@ -26,6 +27,7 @@ class ExecutionFailure(Exception):
     status_code: int
     message: str
     retryable: bool
+    reset_at: datetime | None = None
 
     def __post_init__(self) -> None:
         Exception.__init__(self, self.message)

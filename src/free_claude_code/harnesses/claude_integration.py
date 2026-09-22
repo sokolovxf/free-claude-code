@@ -16,6 +16,7 @@ from free_claude_code.harnesses.config_file import atomic_write_text
 _ENV = "claudeCode.environmentVariables"
 _LOGIN = "claudeCode.disableLoginPrompt"
 _ONBOARDING = "hasCompletedOnboarding"
+_LEGACY_GATEWAY_MODEL_DISCOVERY = "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"
 
 
 def settings_path() -> Path:
@@ -79,7 +80,8 @@ def _connected(
             environment.get("ANTHROPIC_BASE_URL"), values["ANTHROPIC_BASE_URL"]
         )
         and environment.get("ANTHROPIC_AUTH_TOKEN") == values["ANTHROPIC_AUTH_TOKEN"]
-        and environment.get("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY") == "1"
+        and environment.get("CLAUDE_CODE_USE_GATEWAY") == "1"
+        and _LEGACY_GATEWAY_MODEL_DISCOVERY not in environment
     )
 
 
@@ -93,7 +95,8 @@ def configure(
     """Inspect, connect, or disconnect; preserve unrelated values, not formatting."""
     path = path.resolve()
     values = claude_proxy_values(proxy_root_url, auth_token)
-    document, entries = _read(path, set(values))
+    owned_names = {*values, _LEGACY_GATEWAY_MODEL_DISCOVERY}
+    document, entries = _read(path, owned_names)
     onboarding: JsonObject = {}
     if connected is not False:
         state_path = state_path.resolve()
@@ -103,17 +106,20 @@ def configure(
         if connected:
             document[_LOGIN] = True
             remaining = dict(values)
+            updated_entries: list[JsonObject] = []
             for entry in entries:
                 name = cast(str, entry["name"])
                 if name in remaining:
                     entry["value"] = remaining.pop(name)
-            entries.extend(
+                if name != _LEGACY_GATEWAY_MODEL_DISCOVERY:
+                    updated_entries.append(entry)
+            updated_entries.extend(
                 {"name": name, "value": value} for name, value in remaining.items()
             )
-            document[_ENV] = entries
+            document[_ENV] = updated_entries
         else:
             document.pop(_LOGIN, None)
-            retained = [entry for entry in entries if entry["name"] not in values]
+            retained = [entry for entry in entries if entry["name"] not in owned_names]
             if len(retained) != len(entries):
                 if retained:
                     document[_ENV] = retained

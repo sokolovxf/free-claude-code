@@ -58,6 +58,9 @@ class RouteHealth:
     observed_input_tokens: int = 0
     observed_output_tokens: int = 0
     observed_latency_ms: float | None = None
+    probe_required: bool = False
+    probe_successes: int = 0
+    last_probe_at: datetime | None = None
     updated_at: datetime = field(default_factory=_utc_now)
 
     def is_usable(self, now: datetime | None = None) -> bool:
@@ -77,6 +80,9 @@ class RouteHealth:
             and self.retry_at is not None
             and now < self.retry_at
         ):
+            return False
+
+        if self.state is RouteState.BACKOFF and self.probe_required:
             return False
 
         return self.state in {
@@ -103,6 +109,8 @@ class RouteHealth:
         self.last_failure_status = None
         self.last_failure_message = None
         self.consecutive_failures = 0
+        self.probe_required = False
+        self.probe_successes = 0
         self.success_count += 1
         self.observed_output_tokens += max(output_tokens, 0)
         self.observed_latency_ms = latency_ms
@@ -117,6 +125,7 @@ class RouteHealth:
         retry_at: datetime | None = None,
         quarantine_until: datetime | None = None,
         block: bool = False,
+        requires_probe: bool = False,
     ) -> None:
         """Record a route failure without assuming that it is quota exhaustion."""
         now = _utc_now()
@@ -137,6 +146,8 @@ class RouteHealth:
         self.last_failure_kind = failure_kind
         self.last_failure_status = status_code
         self.last_failure_message = message
+        self.probe_required = requires_probe
+        self.probe_successes = 0
         self.consecutive_failures += 1
         self.failure_count += 1
         self.updated_at = now
@@ -156,6 +167,8 @@ class RouteHealth:
         self.last_failure_at = now
         self.last_failure_kind = "quota_exhausted"
         self.last_failure_message = reason
+        self.probe_required = False
+        self.probe_successes = 0
         self.consecutive_failures += 1
         self.failure_count += 1
         self.updated_at = now
@@ -170,7 +183,32 @@ class RouteHealth:
         self.last_failure_at = now
         self.last_failure_kind = "blocked"
         self.last_failure_message = reason
+        self.probe_required = False
+        self.probe_successes = 0
         self.updated_at = now
+
+    def mark_probe_success(
+        self,
+        *,
+        latency_ms: float | None,
+        required_successes: int,
+        next_probe_at: datetime,
+    ) -> bool:
+        """Record a valid canary and promote only after repeated successes."""
+        if required_successes <= 0:
+            raise ValueError("required_successes must be > 0")
+        now = _utc_now()
+        self.last_probe_at = now
+        self.probe_successes += 1
+        if self.probe_successes >= required_successes:
+            self.mark_success(latency_ms=latency_ms)
+            return True
+        self.state = RouteState.BACKOFF
+        self.retry_at = next_probe_at
+        self.quarantine_until = None
+        self.probe_required = True
+        self.updated_at = now
+        return False
 
     def to_dict(self) -> dict[str, object]:
         """Serialize health state."""
@@ -196,15 +234,22 @@ class RouteHealth:
             "observed_input_tokens": self.observed_input_tokens,
             "observed_output_tokens": self.observed_output_tokens,
             "observed_latency_ms": self.observed_latency_ms,
+            "probe_required": self.probe_required,
+            "probe_successes": self.probe_successes,
+            "last_probe_at": (
+                self.last_probe_at.isoformat() if self.last_probe_at else None
+            ),
             "updated_at": self.updated_at.isoformat(),
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> RouteHealth:
         """Deserialize health state defensively."""
+        state = RouteState(str(data.get("state", RouteState.UNKNOWN)))
+        stored_probe_required = data.get("probe_required")
         return cls(
             route_ref=str(data["route_ref"]),
-            state=RouteState(str(data.get("state", RouteState.UNKNOWN))),
+            state=state,
             last_success_at=_parse_datetime(
                 data.get("last_success_at")  # type: ignore[arg-type]
             ),
@@ -240,6 +285,17 @@ class RouteHealth:
                 if data.get("observed_latency_ms") is not None
                 else None
             ),
+            # Older health files predate background rehabilitation. Treat old
+            # transient-backoff records as probe-required on upgrade.
+            probe_required=(
+                bool(stored_probe_required)
+                if stored_probe_required is not None
+                else state is RouteState.BACKOFF
+            ),
+            probe_successes=int(data.get("probe_successes", 0)),
+            last_probe_at=_parse_datetime(
+                data.get("last_probe_at")  # type: ignore[arg-type]
+            ),
             updated_at=(
                 _parse_datetime(data.get("updated_at"))  # type: ignore[arg-type]
                 or _utc_now()
@@ -255,6 +311,7 @@ class RouteHealthStore:
     def __init__(self, path: Path | None = None) -> None:
         self.path = path or (Path.home() / ".fcc" / "route-health.json")
         self._routes: dict[str, RouteHealth] = {}
+        self._quota_buckets: dict[str, RouteHealth] = {}
 
     def get(self, route_ref: str) -> RouteHealth:
         """Return existing health or create an UNKNOWN record."""
@@ -263,6 +320,14 @@ class RouteHealthStore:
             route = RouteHealth(route_ref=route_ref)
             self._routes[route_ref] = route
         return route
+
+    def get_quota_bucket(self, bucket: str) -> RouteHealth:
+        """Return the shared health record for a provider quota bucket."""
+        quota = self._quota_buckets.get(bucket)
+        if quota is None:
+            quota = RouteHealth(route_ref=f"quota/{bucket}")
+            self._quota_buckets[bucket] = quota
+        return quota
 
     def all(self) -> tuple[RouteHealth, ...]:
         """Return all stored route states."""
@@ -303,6 +368,20 @@ class RouteHealthStore:
 
         self._routes = loaded
 
+        quota_buckets = payload.get("quota_buckets", [])
+        if isinstance(quota_buckets, list):
+            loaded_buckets: dict[str, RouteHealth] = {}
+            for item in quota_buckets:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    health = RouteHealth.from_dict(item)
+                except KeyError, TypeError, ValueError:
+                    continue
+                if health.route_ref.startswith("quota/"):
+                    loaded_buckets[health.route_ref.removeprefix("quota/")] = health
+            self._quota_buckets = loaded_buckets
+
     def save(self) -> None:
         """Atomically persist current state."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -310,6 +389,9 @@ class RouteHealthStore:
         payload = {
             "schema_version": self.SCHEMA_VERSION,
             "routes": [route.to_dict() for route in self._routes.values()],
+            "quota_buckets": [
+                bucket.to_dict() for bucket in self._quota_buckets.values()
+            ],
         }
 
         fd, temporary_path = tempfile.mkstemp(

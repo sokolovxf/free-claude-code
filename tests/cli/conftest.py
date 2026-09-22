@@ -62,6 +62,24 @@ class LaunchCapture:
             if self.health_error:
                 raise self.health_error
             return JsonResponse(b"{}")
+        if request.full_url.endswith("/admin/api/router/status"):
+            return JsonResponse(
+                json.dumps(
+                    {
+                        "selected": "nvidia_nim/catalog-model:variant",
+                        "selected_rank": 1,
+                        "summary": {"executable": 1, "total": 1},
+                        "routes": [
+                            {
+                                "provider_model_ref": "nvidia_nim/catalog-model:variant",
+                                "health": {"state": "unknown"},
+                                "capability": {"tier_name": "UNKNOWN_TIER"},
+                                "quota": {"state": "unknown"},
+                            }
+                        ],
+                    }
+                ).encode()
+            )
         assert "/v1/models?view=" in request.full_url
         assert request.get_header("Authorization") == "Bearer launcher-test-token"
         if self.catalog_error:

@@ -1,5 +1,6 @@
 """Ordinary ingress, routing, readiness, and validation error contracts."""
 
+from dataclasses import replace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -10,11 +11,12 @@ from free_claude_code.application.errors import (
     ApplicationError,
     ApplicationUnavailableError,
     InvalidRequestError,
+    NoFreeRouteAvailableError,
     UnknownProviderError,
 )
 from free_claude_code.config.settings import Settings
 from free_claude_code.providers.open_router import OpenRouterProvider
-from tests.api.support import create_test_app
+from tests.api.support import create_test_app, runtime_for_app
 from tests.providers.support import immediate_admission, make_provider_config
 
 _PRODUCT_REQUESTS = (
@@ -132,6 +134,42 @@ def test_application_errors_share_one_protocol_neutral_base(
     error_type: type[ApplicationError],
 ) -> None:
     assert isinstance(error_type("failure"), ApplicationError)
+
+
+@pytest.mark.parametrize(
+    ("wire_api", "path", "payload"),
+    _PRODUCT_REQUESTS,
+    ids=("messages", "responses"),
+)
+def test_no_verified_free_route_is_terminal_for_client_retry(
+    wire_api: str,
+    path: str,
+    payload: dict[str, object],
+) -> None:
+    app = create_test_app(
+        _settings(
+            model="open_router/test-model",
+            model_fallbacks=("open_router/other-model",),
+            verified_free_models=(),
+        )
+    )
+    runtime = runtime_for_app(app)
+    app.state.services = replace(
+        app.state.services,
+        smart_router=runtime.smart_router,
+        route_health_observer=runtime.route_health_observer,
+    )
+    payload = {**payload, "model": "sonnet"}
+
+    with TestClient(app) as client:
+        response = client.post(path, json=payload)
+
+    assert response.status_code == 503
+    assert response.headers["x-should-retry"] == "false"
+    assert response.json()["error"]["type"] == "api_error"
+    assert "No configured route is currently executable" in response.json()[
+        "error"
+    ]["message"]
 
 
 @pytest.mark.parametrize(

@@ -103,6 +103,18 @@ def test_classify_request_scoped_is_ignored():
     assert classify_failure(
         _failure(FailureKind.INVALID_REQUEST, 400, "bad request")
     ) is HealthClassification.IGNORE
+
+
+def test_classify_413_capacity_rejection_is_backoff():
+    """Provider payload/TPM limits must remove the route from the next ranking."""
+    assert classify_failure(
+        _failure(
+            FailureKind.INVALID_REQUEST,
+            413,
+            "Provider rejected the request as too large.",
+            retryable=False,
+        )
+    ) is HealthClassification.BACKOFF
     assert classify_failure(
         _failure(FailureKind.CONTEXT_WINDOW_EXCEEDED, 400, "context too long")
     ) is HealthClassification.IGNORE
@@ -136,9 +148,9 @@ def test_429_backoff(tmp_path):
     health = store.get("groq/model")
     assert health.state is RouteState.BACKOFF
     assert health.retry_at == FIXED + timedelta(seconds=60)
-    # Backoff is temporary: not usable while active, usable again after retry_at.
+    # Expired backoff enters background-probe probation instead of user traffic.
     assert health.is_usable(FIXED) is False
-    assert health.is_usable(FIXED + timedelta(seconds=61)) is True
+    assert health.is_usable(FIXED + timedelta(seconds=61)) is False
 
 
 def test_429_quota_exhaustion_quarantined(tmp_path):
@@ -146,13 +158,37 @@ def test_429_quota_exhaustion_quarantined(tmp_path):
     observer = _observer(store)
 
     observer.observe_failure(
-        "groq/model", _failure(FailureKind.RATE_LIMIT, 429, "free quota exhausted")
+        "open_router/model",
+        _failure(FailureKind.RATE_LIMIT, 429, "free quota exhausted"),
     )
 
-    health = store.get("groq/model")
+    health = store.get("open_router/model")
     assert health.state is RouteState.QUARANTINED
     assert health.quarantine_until == FIXED + timedelta(seconds=1800)
     assert health.is_usable(FIXED) is False
+    bucket = store.get_quota_bucket("openrouter_free_tier_daily")
+    assert bucket.state is RouteState.QUARANTINED
+    assert bucket.is_usable(FIXED + timedelta(seconds=1801)) is True
+
+
+def test_quota_reset_timestamp_controls_shared_bucket(tmp_path):
+    store = RouteHealthStore(tmp_path / "rh.json")
+    observer = _observer(store)
+    reset_at = FIXED + timedelta(hours=2)
+    failure = ExecutionFailure(
+        FailureKind.RATE_LIMIT,
+        429,
+        "free quota exhausted",
+        True,
+        reset_at=reset_at,
+    )
+
+    observer.observe_failure("open_router/model", failure)
+
+    bucket = store.get_quota_bucket("openrouter_free_tier_daily")
+    assert bucket.quarantine_until == reset_at
+    assert bucket.is_usable(FIXED + timedelta(hours=1)) is False
+    assert bucket.is_usable(reset_at + timedelta(seconds=1)) is True
 
 
 def test_401_blocked(tmp_path):
@@ -205,6 +241,26 @@ def test_request_scoped_failure_does_not_demote(tmp_path):
     health = store.get("groq/model")
     assert health.state is RouteState.AVAILABLE
     assert health.is_usable() is True
+
+
+def test_413_capacity_rejection_backs_off_route(tmp_path):
+    store = RouteHealthStore(tmp_path / "rh.json")
+    observer = _observer(store)
+
+    observer.observe_failure(
+        "groq/openai/gpt-oss-120b",
+        _failure(
+            FailureKind.INVALID_REQUEST,
+            413,
+            "Provider rejected the request as too large.",
+            retryable=False,
+        ),
+    )
+
+    health = store.get("groq/openai/gpt-oss-120b")
+    assert health.state is RouteState.BACKOFF
+    assert health.retry_at == FIXED + timedelta(seconds=60)
+    assert health.is_usable(FIXED) is False
 
 
 def test_success_after_backoff_recovers(tmp_path):
@@ -359,7 +415,10 @@ async def test_first_non_empty_chunk_marks_available(tmp_path):
     ]
 
     assert output == ["event: content\ndata: x\n\n"]
-    assert store.get("provider/provider-model").state is RouteState.AVAILABLE
+    health = store.get("provider/provider-model")
+    assert health.state is RouteState.AVAILABLE
+    assert health.observed_latency_ms is not None
+    assert health.observed_latency_ms >= 0.0
 
 
 @pytest.mark.asyncio

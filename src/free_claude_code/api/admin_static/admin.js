@@ -769,7 +769,11 @@ function renderSections(sections, fields) {
 
 function renderField(field) {
   const wrapper = document.createElement("div");
-  wrapper.className = `field${field.advanced ? " advanced-field" : ""}`;
+  wrapper.className = [
+    "field",
+    field.advanced ? "advanced-field" : "",
+    field.type === "model_list" ? "model-list-field" : "",
+  ].filter(Boolean).join(" ");
   wrapper.dataset.key = field.key;
 
   const label = document.createElement("label");
@@ -1496,7 +1500,7 @@ function renderClaudeIntegration() {
   byId("confirmClaudeIntegration").className = connected ? "danger-button" : "primary-button";
   byId("claudeIntegrationDescription").textContent = connected
     ? "Remove FCC's VS Code settings. Claude onboarding stays completed."
-    : "Will set FCC's URL and token, enable model discovery, skip VS Code login, and complete Claude onboarding.";
+    : "Will set FCC's URL and token, use the gateway, skip VS Code login, and complete Claude onboarding.";
   const files = byId("claudeIntegrationFiles");
   files.replaceChildren();
   if (paths) {

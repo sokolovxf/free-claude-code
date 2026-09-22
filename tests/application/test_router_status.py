@@ -14,12 +14,10 @@ from free_claude_code.application.model_registry import (
     ModelProfile,
     ModelRegistry,
 )
+from free_claude_code.application.route_health import RouteHealthStore, RouteState
 from free_claude_code.application.router_status import build_router_status
-from free_claude_code.application.route_health import RouteHealth, RouteHealthStore, RouteState
 from free_claude_code.application.routing import ProviderModelTarget
-from free_claude_code.application.smart_router import SmartRouter, RouteRequirements
-from free_claude_code.config.model_refs import ConfiguredChatModelRef
-from free_claude_code.config.settings import Settings
+from free_claude_code.application.smart_router import SmartRouter
 
 
 class _FixedSettings:
@@ -386,8 +384,8 @@ def test_build_router_status_does_not_mutate_empty_registry():
 @pytest.fixture
 def test_app(monkeypatch, tmp_path):
     """Create a test app with the real runtime and admin endpoint."""
-    from tests.api.support import create_test_app
     from free_claude_code.config.settings import Settings
+    from tests.api.support import create_test_app
 
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
@@ -417,6 +415,8 @@ def test_router_status_endpoint_exists(test_app):
     data = response.json()
     assert "routes" in data
     assert "selected" in data
+    assert "selected_rank" in data
+    assert "last_successful" in data
     assert "summary" in data
     assert isinstance(data["routes"], list)
     assert isinstance(data["summary"], dict)
@@ -425,6 +425,7 @@ def test_router_status_endpoint_exists(test_app):
 def test_router_status_requires_loopback(monkeypatch, tmp_path):
     """Endpoint requires loopback admin check (inherits from admin_routes)."""
     from fastapi.testclient import TestClient
+
     from tests.api.support import create_test_app
 
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -440,7 +441,7 @@ def test_router_status_requires_loopback(monkeypatch, tmp_path):
 
 def test_router_status_reflects_verified_free_vs_unknown(test_app):
     """Routes not in verified_free_models show UNKNOWN eligibility."""
-    app, runtime = test_app
+    app, _runtime = test_app
 
     # groq/openai/gpt-oss-120b is verified-free; ollama is not
     client = TestClient(app, base_url="http://127.0.0.1", client=("127.0.0.1", 50000))
@@ -459,7 +460,7 @@ def test_router_status_reflects_verified_free_vs_unknown(test_app):
 
 def test_router_status_capability_from_registry(test_app):
     """Capability tier/score comes from ModelRegistry, not hard-coded."""
-    app, runtime = test_app
+    app, _runtime = test_app
     client = TestClient(app, base_url="http://127.0.0.1", client=("127.0.0.1", 50000))
     response = client.get("/admin/api/router/status")
     data = response.json()
@@ -505,7 +506,7 @@ def test_router_status_health_from_store(test_app):
 
 def test_router_status_canonical_identity_per_route(test_app):
     """Each route identified by canonical provider/model ref (provider+model)."""
-    app, runtime = test_app
+    app, _runtime = test_app
     client = TestClient(app, base_url="http://127.0.0.1", client=("127.0.0.1", 50000))
     response = client.get("/admin/api/router/status")
     data = response.json()
@@ -521,8 +522,8 @@ def test_router_status_canonical_identity_per_route(test_app):
 def test_router_status_same_family_providers_independent(test_app):
     """OpenRouter Ultra and Ollama Ultra are separate routes with independent health."""
     # We need a test setup with both
-    from tests.api.support import create_test_app
     from free_claude_code.config.settings import Settings
+    from tests.api.support import create_test_app
 
     settings = Settings(
         MODEL="open_router/nvidia/nemotron-3-ultra-550b-a55b:free",
@@ -574,7 +575,7 @@ def test_router_status_no_mutating_endpoints_exposed(monkeypatch, tmp_path):
 
 def test_existing_smart_router_ranking_unchanged(test_app):
     """Ensure explain() and status don't change rank()/select() behavior."""
-    app, runtime = test_app
+    _app, runtime = test_app
     router = runtime.smart_router
 
     targets = (
@@ -596,8 +597,8 @@ def test_existing_smart_router_ranking_unchanged(test_app):
 
 def test_existing_route_health_observer_unchanged(test_app):
     """RouteHealthObserver behavior unchanged by observability additions."""
-    from free_claude_code.application.route_health_observer import RouteHealthObserver
     from free_claude_code.application.execution import ExecutionFailure, FailureKind
+    from free_claude_code.application.route_health_observer import RouteHealthObserver
 
     runtime = test_app[1]
     health = runtime.smart_router.health
@@ -648,6 +649,7 @@ def test_routing_explanation_all_reasons(test_app):
         "BLOCKED",
         "BACKOFF",
         "QUARANTINED",
+            "QUOTA_EXHAUSTED",
         "UNKNOWN_HEALTH",
     }
     actual = {r.value for r in ExclusionReason}
@@ -656,8 +658,8 @@ def test_routing_explanation_all_reasons(test_app):
 
 def test_router_status_respects_requirements(monkeypatch, tmp_path):
     """Requirements (reasoning, tools) reflected in executable status."""
-    from tests.api.support import create_test_app
     from free_claude_code.config.settings import Settings
+    from tests.api.support import create_test_app
 
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("USERPROFILE", str(tmp_path))

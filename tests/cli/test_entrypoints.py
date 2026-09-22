@@ -445,7 +445,7 @@ def test_claude_child_env_targets_current_proxy_config() -> None:
     assert env["PATH"] == "keep"
     assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:9090"
     assert env["ANTHROPIC_AUTH_TOKEN"] == "proxy-token"
-    assert env["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] == "1"
+    assert env["CLAUDE_CODE_USE_GATEWAY"] == "1"
     assert env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "190000"
     assert env["DISABLE_AUTOUPDATER"] == "1"
     assert env["DISABLE_FEEDBACK_COMMAND"] == "1"
@@ -455,4 +455,5 @@ def test_claude_child_env_targets_current_proxy_config() -> None:
     assert env["no_proxy"] == env["NO_PROXY"]
     assert "ANTHROPIC_API_URL" not in env
     assert "ANTHROPIC_API_KEY" not in env
+    assert "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY" not in env
     assert "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" not in env

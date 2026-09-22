@@ -1,14 +1,17 @@
 """Capability-first, hard-$0 route selection for Smart Router v2."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
+from typing import TYPE_CHECKING
 
-from free_claude_code.application.routing import ProviderModelTarget
+if TYPE_CHECKING:
+    from free_claude_code.application.routing import ProviderModelTarget
 
 from .model_registry import (
     CapabilityTier,
-    FreeEligibility,
     ModelProfile,
     ModelRegistry,
 )
@@ -23,6 +26,13 @@ class RouteRequirements:
     minimum_capability_score: float = 0.0
     requires_reasoning: bool = False
     requires_tools: bool = False
+
+
+class RoutingPolicy(StrEnum):
+    """Foreground route objective."""
+
+    QUALITY = "quality"
+    FASTEST = "fastest"
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +66,7 @@ class ExclusionReason(StrEnum):
     BLOCKED = "BLOCKED"
     BACKOFF = "BACKOFF"
     QUARANTINED = "QUARANTINED"
+    QUOTA_EXHAUSTED = "QUOTA_EXHAUSTED"
     UNKNOWN_HEALTH = "UNKNOWN_HEALTH"
 
 
@@ -96,9 +107,12 @@ class SmartRouter:
         self,
         registry: ModelRegistry,
         health: RouteHealthStore,
+        *,
+        policy: str | RoutingPolicy = RoutingPolicy.QUALITY,
     ) -> None:
         self.registry = registry
         self.health = health
+        self.policy = RoutingPolicy(policy)
 
     @staticmethod
     def _now() -> datetime:
@@ -221,14 +235,6 @@ class SmartRouter:
                 ExclusionReason.NOT_REGISTERED,
             )
 
-        if profile.free_eligibility is not FreeEligibility.VERIFIED_FREE:
-            return _Evaluation(
-                target,
-                profile,
-                self.health.get(target.provider_model_ref),
-                ExclusionReason.NOT_VERIFIED_FREE,
-            )
-
         if profile.capability_tier > requirements.minimum_tier:
             return _Evaluation(
                 target,
@@ -274,6 +280,16 @@ class SmartRouter:
 
         route_health = self.health.get(target.provider_model_ref)
 
+        if profile.quota_bucket is not None:
+            quota_health = self.health.get_quota_bucket(profile.quota_bucket)
+            if not quota_health.is_usable(now):
+                return _Evaluation(
+                    target,
+                    profile,
+                    route_health,
+                    ExclusionReason.QUOTA_EXHAUSTED,
+                )
+
         if route_health.state is RouteState.BLOCKED:
             return _Evaluation(
                 target,
@@ -308,8 +324,8 @@ class SmartRouter:
 
         return ranked[0] if ranked else None
 
-    @staticmethod
     def _apply_provider_diversity(
+        self,
         candidates: list[RankedRoute],
     ) -> tuple[RankedRoute, ...]:
         """Prefer distinct providers when capability is otherwise comparable."""
@@ -332,16 +348,54 @@ class SmartRouter:
             for candidate in candidates
         ]
 
-        scored.sort(
-            key=lambda candidate: (
-                candidate.tier_score,
-                -candidate.capability_score,
-                candidate.provider_diversity_score,
-                candidate.health.failure_count,
+        def latency(candidate: RankedRoute) -> float:
+            return (
                 candidate.health.observed_latency_ms
                 if candidate.health.observed_latency_ms is not None
-                else float("inf"),
+                else float("inf")
             )
-        )
+
+        if self.policy is RoutingPolicy.FASTEST:
+            scored.sort(
+                key=lambda candidate: (
+                    _health_rank(candidate),
+                    latency(candidate),
+                    candidate.tier_score,
+                    -candidate.capability_score,
+                    candidate.provider_diversity_score,
+                    candidate.health.failure_count,
+                )
+            )
+        else:
+            scored.sort(
+                key=lambda candidate: (
+                    candidate.tier_score,
+                    _health_rank(candidate),
+                    latency(candidate) if _health_rank(candidate) == 0 else float("inf"),
+                    -candidate.capability_score,
+                    candidate.provider_diversity_score,
+                    candidate.health.failure_count,
+                )
+            )
 
         return tuple(scored)
+
+
+def _health_rank(candidate: RankedRoute) -> int:
+    """Rank proven/fast evidence ahead of routes that still need a trial.
+
+    Capability tier remains the first key: a healthy Tier 1 route still beats
+    a Tier 2 route. Within a tier, however, a measured successful route should
+    beat an UNKNOWN route, and measured latency should beat capability-score
+    differences. This prevents a known 673 ms route from losing to an
+    untested or slower peer merely because its static score is a few points
+    lower.
+    """
+    if (
+        candidate.health.state is RouteState.AVAILABLE
+        and candidate.health.observed_latency_ms is not None
+    ):
+        return 0
+    if candidate.health.state is RouteState.AVAILABLE:
+        return 1
+    return 2

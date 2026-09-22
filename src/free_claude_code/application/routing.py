@@ -3,10 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from .smart_router import SmartRouter
 
 from loguru import logger
 
@@ -87,7 +83,7 @@ class ModelRouter:
         self,
         settings: Settings,
         *,
-        smart_router: SmartRouter | None = None,
+        smart_router: object | None = None,
     ):
         self._settings = settings
         self._smart_router = smart_router
@@ -165,8 +161,8 @@ class ModelRouter:
 
         if not ranked:
             raise NoFreeRouteAvailableError(
-                "No verified-free route is currently executable. All configured "
-                "routes are either not explicitly verified free or unavailable."
+                "No configured route is currently executable. All configured "
+                "routes are unavailable."
             )
 
         ordered = tuple(route.target for route in ranked)

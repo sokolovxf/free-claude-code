@@ -20,6 +20,7 @@ from loguru import logger
 
 from free_claude_code.core.failures import ExecutionFailure, FailureKind
 
+from .model_registry import quota_bucket_for_route
 from .route_health import RouteHealthStore, RouteState
 
 
@@ -41,9 +42,15 @@ _QUOTA_EXHAUSTION_MARKERS = frozenset(
         "quota",  # "quota exceeded", "quota exhausted", "free quota"
         "daily limit",
         "monthly limit",
+        "daily usage limit",
+        "monthly usage limit",
         "usage limit",
+        "free-models-per-day",
+        "free models per day",
         "credits exhausted",
         "insufficient credits",
+        "insufficient_quota",
+        "insufficient user quota",
         "out of credits",
         "allocation exhausted",
     }
@@ -66,9 +73,12 @@ def classify_failure(failure: ExecutionFailure) -> HealthClassification:
       explicit quota/credit signal upgrades it to QUARANTINED.
     - Authentication / billing / permission -> BLOCKED (never transient).
     - Overload / timeout / upstream / unavailable -> BACKOFF.
-    - Request-scoped failures (invalid request, context window exceeded) do not
-      reflect provider availability and are IGNORED so a healthy route is not
-      demoted for a client-side error.
+    - Ordinary request-scoped failures (invalid request, context window
+      exceeded) do not reflect provider availability and are IGNORED so a
+      healthy route is not demoted for a client-side error.
+    - A 413 request-size rejection is different: it is a route capacity signal
+      (for example, a provider TPM or payload limit), so that route enters
+      temporary BACKOFF and SmartRouter does not select it for every turn.
     """
     kind = failure.kind
 
@@ -85,6 +95,12 @@ def classify_failure(failure: ExecutionFailure) -> HealthClassification:
         FailureKind.TIMEOUT,
         FailureKind.UPSTREAM,
         FailureKind.UNAVAILABLE,
+    ):
+        return HealthClassification.BACKOFF
+
+    if failure.status_code == 413 and kind in (
+        FailureKind.INVALID_REQUEST,
+        FailureKind.CONTEXT_WINDOW_EXCEEDED,
     ):
         return HealthClassification.BACKOFF
 
@@ -144,6 +160,37 @@ class RouteHealthObserver:
             return
         self._apply(route_ref, classification, failure)
 
+    def observe_probe_failure(self, route_ref: str, failure: ExecutionFailure) -> None:
+        """Record a canary failure, including probe-specific request errors."""
+        classification = classify_failure(failure)
+        if classification is HealthClassification.IGNORE:
+            now = self._now()
+            health = self._store.get(route_ref)
+            health.mark_failure(
+                failure_kind="probe_failure",
+                status_code=failure.status_code,
+                message=failure.message or failure.kind.value,
+                retry_at=now + timedelta(seconds=self._backoff_seconds),
+                requires_probe=True,
+            )
+            self._finish(route_ref, "probe_failure", RouteState.BACKOFF)
+            return
+        self._apply(route_ref, classification, failure)
+
+    def quota_bucket_for_route(self, route_ref: str) -> str | None:
+        """Return the shared quota bucket associated with a route, if any."""
+        return quota_bucket_for_route(route_ref)
+
+    def is_route_usable(self, route_ref: str) -> bool:
+        """Return whether route and shared quota health allow another attempt."""
+        route = self._store.get(route_ref)
+        if not route.is_usable(self._now()):
+            return False
+        bucket = quota_bucket_for_route(route_ref)
+        return bucket is None or self._store.get_quota_bucket(bucket).is_usable(
+            self._now()
+        )
+
     def observe_post_commit_failure(
         self, route_ref: str, failure: ExecutionFailure
     ) -> None:
@@ -161,6 +208,27 @@ class RouteHealthObserver:
             failure.status_code,
         )
 
+    def observe_probe_success(
+        self,
+        route_ref: str,
+        *,
+        latency_ms: float | None,
+        required_successes: int,
+        next_probe_at: datetime,
+    ) -> bool:
+        """Record a background canary and promote after repeated passes."""
+        promoted = self._store.get(route_ref).mark_probe_success(
+            latency_ms=latency_ms,
+            required_successes=required_successes,
+            next_probe_at=next_probe_at,
+        )
+        self._finish(
+            route_ref,
+            "probe_promoted" if promoted else "probe_success",
+            RouteState.AVAILABLE if promoted else RouteState.BACKOFF,
+        )
+        return promoted
+
     def _apply(
         self,
         route_ref: str,
@@ -177,13 +245,22 @@ class RouteHealthObserver:
                 status_code=failure.status_code,
                 message=message,
                 retry_at=now + timedelta(seconds=self._backoff_seconds),
+                requires_probe=True,
             )
             self._finish(route_ref, "transient_failure", RouteState.BACKOFF)
         elif classification is HealthClassification.QUARANTINED:
+            bucket = quota_bucket_for_route(route_ref)
             health.mark_quarantined(
-                until=now + timedelta(seconds=self._quarantine_seconds),
+                until=failure.reset_at
+                or now + timedelta(seconds=self._quarantine_seconds),
                 reason=message,
             )
+            if bucket is not None:
+                self._store.get_quota_bucket(bucket).mark_quarantined(
+                    until=failure.reset_at
+                    or now + timedelta(seconds=self._quarantine_seconds),
+                    reason=message,
+                )
             self._finish(route_ref, "quota_exhausted", RouteState.QUARANTINED)
         elif classification is HealthClassification.BLOCKED:
             health.mark_blocked(reason=message)

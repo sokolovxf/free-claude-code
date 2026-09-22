@@ -636,6 +636,19 @@ def test_admin_static_places_reasoning_fields_in_model_config():
     assert 'sections: ["models", "thinking", "web_tools"]' not in script
 
 
+def test_admin_static_model_list_fields_use_the_full_panel_width():
+    script = Path("src/free_claude_code/api/admin_static/admin.js").read_text(
+        encoding="utf-8"
+    )
+    styles = Path("src/free_claude_code/api/admin_static/admin.css").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'field.type === "model_list" ? "model-list-field" : ""' in script
+    assert ".field.model-list-field" in styles
+    assert "grid-column: 1 / -1" in styles
+
+
 def test_admin_static_model_combobox_owns_dropdown_and_search_behavior():
     script = Path("src/free_claude_code/api/admin_static/admin.js").read_text(
         encoding="utf-8"
@@ -752,7 +765,7 @@ def test_admin_config_masks_secrets_and_exposes_manifest(monkeypatch, tmp_path):
     assert progress_timeout_field["label"] == "Provider Progress Timeout"
     assert progress_timeout_field["section"] == "runtime"
     assert progress_timeout_field["type"] == "number"
-    assert progress_timeout_field["value"] == "600.0"
+    assert progress_timeout_field["value"] == "45.0"
     assert progress_timeout_field["advanced"] is True
     assert progress_timeout_field["restart_required"] is False
     assert "non-empty protocol event" in progress_timeout_field["description"]

@@ -27,6 +27,7 @@ SPEC = HarnessSpec(
     display_name="Claude Code",
     install_hint="Install Claude Code with: npm install -g @anthropic-ai/claude-code",
     configure=_configure,
+    show_router_banner=True,
 )
 
 

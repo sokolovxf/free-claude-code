@@ -189,12 +189,14 @@ class ControlledFallbackProvider:
         failure: ExecutionFailure | None = None,
         chunks_before_failure: tuple[str, ...] = (),
         responses_chunks_before_failure: tuple[str, ...] = (),
+        raise_after_responses_chunks: bool = False,
         text: str | None = None,
         validation_error: InvalidRequestError | None = None,
     ) -> None:
         self._failure = failure
         self._chunks_before_failure = chunks_before_failure
         self._responses_chunks_before_failure = responses_chunks_before_failure
+        self._raise_after_responses_chunks = raise_after_responses_chunks
         self._text = text
         self._validation_error = validation_error
         self.stream_models: list[str] = []
@@ -250,6 +252,8 @@ class ControlledFallbackProvider:
                 yield chunk
             if self._failure is not None:
                 if self._responses_chunks_before_failure:
+                    if self._raise_after_responses_chunks:
+                        raise self._failure
                     yield responses_failure_event(self._failure, model=public_model)
                     return
                 raise self._failure

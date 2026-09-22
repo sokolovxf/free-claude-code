@@ -1,6 +1,7 @@
 """Provider execution shared by inbound API adapters."""
 
 import asyncio
+import json
 import math
 import sys
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -339,11 +340,17 @@ class ProviderExecutor:
 
         async def provider_body() -> AsyncIterator[str]:
             loop = asyncio.get_running_loop()
-            progress_deadline = loop.time() + self._progress_timeout_seconds
+            last_failure: ExecutionFailure | None = None
             for index, target in enumerate(candidates):
+                if self._observer is not None and not self._observer.is_route_usable(
+                    target.provider_model_ref
+                ):
+                    continue
                 provider_stream: AsyncIterator[str] | None = None
                 candidate_committed = False
                 candidate_failure: ExecutionFailure | None = None
+                buffered_chunks: list[str] = []
+                progress_deadline = loop.time() + self._progress_timeout_seconds
                 try:
                     opening_started = monotonic()
                     try:
@@ -361,10 +368,11 @@ class ProviderExecutor:
                         )
                     while provider_stream is not None:
                         if loop.time() >= progress_deadline:
-                            raise self._progress_timeout_failure(
+                            candidate_failure = self._progress_timeout_failure(
                                 request_id=request_id,
                                 provider_id=target.provider_id,
                             )
+                            break
                         progress_timeout = asyncio.timeout_at(progress_deadline)
                         read_failure: ExecutionFailure | None = None
                         try:
@@ -378,15 +386,17 @@ class ProviderExecutor:
                         except TimeoutError as exc:
                             if not progress_timeout.expired():
                                 raise
-                            raise self._progress_timeout_failure(
-                                request_id=request_id,
-                                provider_id=target.provider_id,
-                            ) from exc
-                        if progress_timeout.expired():
-                            raise self._progress_timeout_failure(
+                            candidate_failure = self._progress_timeout_failure(
                                 request_id=request_id,
                                 provider_id=target.provider_id,
                             )
+                            break
+                        if progress_timeout.expired():
+                            candidate_failure = self._progress_timeout_failure(
+                                request_id=request_id,
+                                provider_id=target.provider_id,
+                            )
+                            break
                         if read_failure is not None:
                             candidate_failure = read_failure
                             break
@@ -394,10 +404,16 @@ class ProviderExecutor:
                             await asyncio.sleep(0)
                             continue
                         if not candidate_committed:
+                            buffered_chunks.append(chunk)
+                        if not candidate_committed and _is_meaningful_chunk(chunk):
                             candidate_committed = True
                             if self._observer is not None:
                                 self._observer.observe_success(
-                                    target.provider_model_ref
+                                    target.provider_model_ref,
+                                    latency_ms=max(
+                                        0.0,
+                                        (monotonic() - opening_started) * 1000.0,
+                                    ),
                                 )
                             if index > 0:
                                 self._trace_fallback_selected(
@@ -407,7 +423,11 @@ class ProviderExecutor:
                                     candidate_index=index + 1,
                                     candidate_count=len(candidates),
                                 )
-                        yield chunk
+                            for buffered_chunk in buffered_chunks:
+                                yield buffered_chunk
+                            buffered_chunks.clear()
+                        elif candidate_committed:
+                            yield chunk
                         progress_deadline = loop.time() + self._progress_timeout_seconds
                 finally:
                     if provider_stream is not None:
@@ -433,6 +453,8 @@ class ProviderExecutor:
                             ) from exc
 
                 if candidate_failure is None:
+                    for buffered_chunk in buffered_chunks:
+                        yield buffered_chunk
                     return
                 if candidate_committed:
                     # A stream that already delivered content failed afterward.
@@ -446,6 +468,7 @@ class ProviderExecutor:
                     self._observer.observe_failure(
                         target.provider_model_ref, candidate_failure
                     )
+                last_failure = candidate_failure
                 if index + 1 >= len(candidates):
                     raise candidate_failure
                 next_target = candidates[index + 1]
@@ -458,6 +481,9 @@ class ProviderExecutor:
                     candidate_index=index + 2,
                     candidate_count=len(candidates),
                 )
+
+            if last_failure is not None:
+                raise last_failure
 
         stream_trace: dict[str, object] = {
             "request_id": request_id,
@@ -484,3 +510,55 @@ class ProviderExecutor:
             chunk_event=None,
             extra=stream_trace,
         )
+
+
+def _is_meaningful_chunk(chunk: str) -> bool:
+    """Recognize semantic output, excluding protocol-only stream scaffolding."""
+    event_name, data = _sse_event_parts(chunk)
+    if event_name is None:
+        return True
+    if event_name.endswith(".delta") or event_name.endswith("_delta"):
+        return True
+    if event_name == "content_block_start":
+        try:
+            payload = json.loads(data)
+        except (TypeError, ValueError):
+            return False
+        content_block = payload.get("content_block")
+        return isinstance(content_block, dict) and content_block.get("type") in {
+            "tool_use",
+            "server_tool_use",
+        }
+    if event_name == "response.output_item.added":
+        try:
+            payload = json.loads(data)
+        except (TypeError, ValueError):
+            return False
+        item = payload.get("item")
+        return isinstance(item, dict) and item.get("type") in {
+            "function_call",
+            "computer_call",
+        }
+    if event_name in {
+        "message_start",
+        "message_stop",
+        "message_delta",
+        "content_block_stop",
+        "response.created",
+        "response.completed",
+        "response.failed",
+        "response.incomplete",
+    }:
+        return False
+    return True
+
+
+def _sse_event_parts(chunk: str) -> tuple[str | None, str]:
+    event_name: str | None = None
+    data_lines: list[str] = []
+    for line in chunk.splitlines():
+        if line.startswith("event:"):
+            event_name = line.partition(":")[2].strip()
+        elif line.startswith("data:"):
+            data_lines.append(line.partition(":")[2].lstrip())
+    return event_name, "\n".join(data_lines)

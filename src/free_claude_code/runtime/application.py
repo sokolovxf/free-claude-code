@@ -25,11 +25,13 @@ from free_claude_code.application.errors import (
     ApplicationUnavailableError,
     InvalidRequestError,
 )
+from free_claude_code.application.model_intelligence import synchronize_model_registry
 from free_claude_code.application.model_metadata import ProviderModelRefreshResult
 from free_claude_code.application.model_registry import ModelRegistry
 from free_claude_code.application.ports import StopResult
 from free_claude_code.application.route_health import RouteHealthStore
 from free_claude_code.application.route_health_observer import RouteHealthObserver
+from free_claude_code.application.route_probe import RouteProbeService
 from free_claude_code.application.router_status import build_router_status
 from free_claude_code.application.smart_router import SmartRouter
 from free_claude_code.config.admin.persistence import (
@@ -174,8 +176,14 @@ class ApplicationRuntime:
         self._smart_router = SmartRouter(
             self._model_registry,
             self._route_health,
+            policy=self.provider_manager.current_settings().smart_router_policy,
         )
         self._route_health_observer = RouteHealthObserver(self._route_health)
+        self._route_probe = RouteProbeService(
+            provider_manager,
+            self._route_health,
+            self._route_health_observer,
+        )
         self._configuration = configuration
         self._code_service = code_service
         self._folder_picker = NativeFolderPicker()
@@ -202,6 +210,7 @@ class ApplicationRuntime:
         self._connected_accounts_closed = False
         self._lifecycle_lock = asyncio.Lock()
         self._startup_tasks: list[asyncio.Task[None]] = []
+        self._route_probe_task: asyncio.Task[None] | None = None
         self._http_ready = asyncio.Event()
         self._messaging_state = (
             "disabled" if self.settings.messaging_platform == "none" else "starting"
@@ -245,6 +254,10 @@ class ApplicationRuntime:
                         "Application runtime is shutting down."
                     )
                 self.provider_manager.start_model_list_refresh()
+                self._route_probe_task = asyncio.create_task(
+                    self._route_probe.run(),
+                    name="fcc-route-probes",
+                )
                 self._startup_tasks.append(
                     asyncio.create_task(
                         run_sync_owned(remove_retired_chat_history),
@@ -297,6 +310,13 @@ class ApplicationRuntime:
             if self._closed:
                 return True
             logger.info("Shutdown requested, cleaning up...")
+            if self._route_probe_task is not None:
+                self._route_probe_task.cancel()
+                await asyncio.gather(
+                    self._route_probe_task,
+                    return_exceptions=True,
+                )
+                self._route_probe_task = None
             for task in self._startup_tasks:
                 if not task.done():
                     task.cancel()
@@ -534,6 +554,10 @@ class ApplicationRuntime:
 
     async def admin_router_status(self) -> JsonObject:
         """Return a read-only snapshot of local routing and health state."""
+        # The request path synchronizes lazily, but the launcher banner and
+        # admin UI query this endpoint before the first request. Keep the
+        # diagnostic surface representative of the configured route pool.
+        synchronize_model_registry(self._model_registry, self.settings)
         return build_router_status(
             registry=self._model_registry,
             health=self._route_health,

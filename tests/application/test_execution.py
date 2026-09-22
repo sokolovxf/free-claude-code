@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import AsyncIterator, Mapping
+from dataclasses import replace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -9,6 +10,8 @@ import pytest
 from free_claude_code.application.errors import InvalidRequestError
 from free_claude_code.application.execution import ProviderExecutor
 from free_claude_code.application.model_metadata import ProviderModelInfo
+from free_claude_code.application.route_health import RouteHealthStore
+from free_claude_code.application.route_health_observer import RouteHealthObserver
 from free_claude_code.application.routing import (
     ProviderModelTarget,
     ResolvedModelRoute,
@@ -650,6 +653,51 @@ async def test_multiple_retryable_failures_walk_fallbacks_in_order() -> None:
 
 
 @pytest.mark.asyncio
+async def test_shared_quota_skips_sibling_provider_routes_after_429(tmp_path) -> None:
+    quota_failure = ExecutionFailure(
+        FailureKind.RATE_LIMIT,
+        429,
+        "Rate limit exceeded: free quota exhausted",
+        True,
+    )
+    first = ControlledProvider([quota_failure])
+    sibling = ControlledProvider(["should not run"])
+    other_provider = ControlledProvider(["fallback-frame"])
+    providers = {
+        "open_router": first,
+        "other": other_provider,
+        "sibling": sibling,
+    }
+    observer = RouteHealthObserver(RouteHealthStore(tmp_path / "health.json"))
+    executor = ProviderExecutor(
+        AsyncMock(side_effect=providers.__getitem__),
+        progress_timeout_seconds=60.0,
+        route_health_observer=observer,
+    )
+    routed = _routed_request(
+        _target("open_router", "model-b"),
+        _target("other", "model-c"),
+    )
+    routed = replace(
+        routed,
+        resolved=replace(
+            routed.resolved,
+            primary=_target("open_router", "model-a"),
+        ),
+    )
+    stream = executor.stream_messages(
+        routed,
+        raw_log_payload={},
+        request_id="shared-quota",
+    )
+
+    assert [chunk async for chunk in stream] == ["fallback-frame"]
+    assert first.stream_close_calls == 1
+    assert sibling.stream_calls == []
+    assert other_provider.stream_calls[0]["request"].model == "model-c"
+
+
+@pytest.mark.asyncio
 async def test_empty_primary_completion_does_not_select_fallback() -> None:
     primary = ControlledProvider([])
     fallback = FakeProvider()
@@ -1036,7 +1084,7 @@ async def test_progress_timeout_before_first_chunk_is_canonical_and_correlated()
 
 
 @pytest.mark.asyncio
-async def test_application_progress_timeout_never_resolves_fallback() -> None:
+async def test_application_progress_timeout_resolves_fallback() -> None:
     primary = ControlledProvider([WaitStep()])
     fallback = FakeProvider()
     resolved_ids: list[str] = []
@@ -1052,15 +1100,12 @@ async def test_application_progress_timeout_never_resolves_fallback() -> None:
         request_id="req_terminal_progress_timeout",
     )
 
-    with pytest.raises(ExecutionFailure) as exc_info:
-        await anext(stream)
-
-    assert exc_info.value.kind is FailureKind.TIMEOUT
-    assert exc_info.value.status_code == 504
-    assert exc_info.value.retryable is False
-    assert resolved_ids == ["provider"]
+    assert [chunk async for chunk in stream] == [
+        "event: message_stop\ndata: {}\n\n"
+    ]
+    assert resolved_ids == ["provider", "fallback"]
     assert primary.stream_close_calls == 1
-    assert fallback.stream_calls == []
+    assert fallback.stream_close_calls == 1
 
 
 @pytest.mark.asyncio
@@ -1170,7 +1215,7 @@ async def test_empty_chunks_do_not_renew_provider_progress() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fallback_transition_does_not_reset_shared_progress_deadline() -> None:
+async def test_fallback_transition_renews_progress_deadline() -> None:
     primary_wait = WaitStep()
     primary = ControlledProvider(
         [primary_wait, _execution_failure("primary overloaded")]
@@ -1219,7 +1264,7 @@ async def test_fallback_transition_does_not_reset_shared_progress_deadline() -> 
     read_deadlines = [deadline for deadline in deadlines if deadline is not None]
     assert len(read_deadlines) >= 3
     assert read_deadlines[0] == read_deadlines[1]
-    assert read_deadlines[-1] == read_deadlines[0] + 2
+    assert read_deadlines[-1] > read_deadlines[0]
     assert exc_info.value.kind == FailureKind.TIMEOUT
     assert primary.stream_close_calls == fallback.stream_close_calls == 1
     timeout_trace = next(
