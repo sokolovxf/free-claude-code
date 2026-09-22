@@ -18,6 +18,7 @@ from free_claude_code.core.anthropic import (
     anthropic_request_snapshot,
     get_token_count,
 )
+from free_claude_code.core.diagnostics import safe_exception_message
 from free_claude_code.core.failures import ExecutionFailure, FailureKind
 from free_claude_code.core.openai_responses import (
     OpenAIResponsesRequest,
@@ -48,6 +49,31 @@ WireApi = Literal["messages", "responses"]
 CandidateStreamOpener = Callable[
     [int, ProviderModelTarget], Awaitable[AsyncIterator[str]]
 ]
+
+
+def _provider_os_error_failure(
+    error: OSError,
+    *,
+    provider_id: str,
+) -> ExecutionFailure:
+    """Turn platform transport errors into a fallback-eligible failure.
+
+    Windows can surface a raw ``OSError`` (not an SDK/network exception) while
+    opening or reading an async provider stream. Letting that escape the
+    provider loop turns a recoverable route failure into an HTTP 500 and stops
+    SmartRouter fallback. Keep the detail bounded and redacted for the final
+    response while retaining the provider identity for diagnosis.
+    """
+    detail = safe_exception_message(
+        error,
+        fallback="invalid provider stream operation",
+    )
+    return ExecutionFailure(
+        kind=FailureKind.UNAVAILABLE,
+        status_code=502,
+        message=f"Provider {provider_id} stream failed: {detail}",
+        retryable=True,
+    )
 
 
 class ProviderExecutor:
@@ -357,6 +383,11 @@ class ProviderExecutor:
                         provider_stream = await open_candidate(index, target)
                     except ExecutionFailure as failure:
                         candidate_failure = failure
+                    except OSError as error:
+                        candidate_failure = _provider_os_error_failure(
+                            error,
+                            provider_id=target.provider_id,
+                        )
                     finally:
                         # Initialization has its own request budget. Upstream progress
                         # time is not spent waiting for a provider's startup task.
@@ -388,6 +419,12 @@ class ProviderExecutor:
                                 raise
                             candidate_failure = self._progress_timeout_failure(
                                 request_id=request_id,
+                                provider_id=target.provider_id,
+                            )
+                            break
+                        except OSError as error:
+                            candidate_failure = _provider_os_error_failure(
+                                error,
                                 provider_id=target.provider_id,
                             )
                             break

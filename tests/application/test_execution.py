@@ -600,6 +600,56 @@ async def test_retryable_preframe_failure_selects_fallback_after_closing_primary
 
 
 @pytest.mark.asyncio
+async def test_os_error_before_first_frame_selects_fallback() -> None:
+    primary = ControlledProvider([OSError(22, "Invalid argument")])
+    fallback = ControlledProvider(["fallback-frame"])
+    resolved_ids: list[str] = []
+
+    async def resolve(provider_id: str) -> FakeProvider:
+        resolved_ids.append(provider_id)
+        return {"provider": primary, "fallback": fallback}[provider_id]
+
+    executor = ProviderExecutor(resolve, progress_timeout_seconds=60.0)
+    stream = executor.stream_messages(
+        _routed_request(_target("fallback", "fallback-model")),
+        raw_log_payload={},
+        request_id="req_os_error_fallback",
+    )
+
+    assert [chunk async for chunk in stream] == ["fallback-frame"]
+    assert resolved_ids == ["provider", "fallback"]
+    assert primary.stream_close_calls == 1
+    assert fallback.stream_close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_os_error_while_opening_selects_fallback() -> None:
+    primary = FakeProvider()
+    fallback = ControlledProvider(["fallback-frame"])
+    resolved_ids: list[str] = []
+
+    async def resolve(provider_id: str) -> FakeProvider:
+        resolved_ids.append(provider_id)
+        return {"provider": primary, "fallback": fallback}[provider_id]
+
+    executor = ProviderExecutor(resolve, progress_timeout_seconds=60.0)
+    with patch.object(
+        primary,
+        "stream_messages",
+        side_effect=OSError(22, "Invalid argument"),
+    ):
+        stream = executor.stream_messages(
+            _routed_request(_target("fallback", "fallback-model")),
+            raw_log_payload={},
+            request_id="req_os_error_open",
+        )
+        assert [chunk async for chunk in stream] == ["fallback-frame"]
+
+    assert resolved_ids == ["provider", "fallback"]
+    assert fallback.stream_close_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_fallback_chain_preserves_exact_last_failure() -> None:
     first = _execution_failure("first")
     second = _execution_failure("second")
